@@ -1,5 +1,5 @@
 """
-EdgeISP — Phase 1 Regression Tests
+Omni-ISP — Phase 1 Regression Tests
 =====================================
 Tests for the three pipeline correctness fixes made in Phase 1.
 
@@ -245,7 +245,7 @@ class TestLinearLuminanceWrapper(unittest.TestCase):
 
 class TestPipelineOrder(unittest.TestCase):
     """
-    Structural tests: verify correct module ordering in infinite_isp.py
+    Structural tests: verify correct module ordering in omni_isp.py
     by inspecting the source text of run_pipeline().
     """
 
@@ -253,7 +253,7 @@ class TestPipelineOrder(unittest.TestCase):
     def setUpClass(cls):
         src_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "infinite_isp.py",
+            "omni_isp.py",
         )
         with open(src_path) as f:
             lines = f.readlines()

@@ -4,7 +4,7 @@ Description: Guided Filter Local Tone Mapping for LDCI.
              Implements edge-preserving base/detail decomposition using the
              He et al. (IEEE TPAMI 2013) guided filter — self-guided variant.
              Pure NumPy, O(N) via integral-image box filtering.
-Author: EdgeISP (10xEngineers fork)
+Author: Omni-ISP (10xEngineers fork)
 ------------------------------------------------------------
 Algorithm
 ---------

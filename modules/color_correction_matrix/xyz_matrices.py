@@ -3,7 +3,7 @@ File: xyz_matrices.py
 Description: Standard CIE XYZ ↔ target colour-space transformation matrices.
              All matrices are for the D65 illuminant and assume linear light input.
              Used by the XYZ-intermediate CCM architecture (Phase 3.1).
-Author: EdgeISP (10xEngineers fork)
+Author: Omni-ISP (10xEngineers fork)
 ------------------------------------------------------------
 Conventions
 -----------

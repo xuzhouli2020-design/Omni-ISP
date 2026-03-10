@@ -310,3 +310,69 @@ output:
   format: "png"
   jpeg_quality: 95      # 1–95; used only when format="jpeg"
 
+# ---------------------------------------------------------------------------
+# Burst Capture — multi-frame denoising (Phase 5.1–5.4)
+# When is_enable=true, run_pipeline() expects a pre-loaded Bayer stack
+# supplied via isp.set_burst_stack(stack).  Frame 0 is the reference.
+# ---------------------------------------------------------------------------
+burst_capture:
+  is_enable: false
+  n_frames: 4                  # expected number of frames (informational)
+  ref_idx: 0                   # reference frame index
+  registration: "phase"        # "phase" (translation, pure NumPy) | "none"
+  merge_method: "weighted_mean" # "weighted_mean" | "mean" | "median"
+  block_size: 16               # SAD block size in Bayer pixels
+  motion_threshold: 15.0       # SAD/pixel threshold for motion detection (ADU)
+
+# ---------------------------------------------------------------------------
+# Temporal Noise Reduction — IIR EMA filter for video (Phase 5.5)
+# Runs after BNR, before 3A stats.  Requires persistent state across frames.
+# ---------------------------------------------------------------------------
+temporal_nr:
+  is_enable: false             # enable in video / continuous-capture mode only
+  alpha: 0.7                   # IIR blend weight (0=off, ~0.7=strong smoothing)
+  motion_threshold: 8.0        # green-channel diff threshold (ADU)
+  downsample: 2                # motion-estimation downsample factor
+
+# ---------------------------------------------------------------------------
+# Lens Correction — unified CAC + LDC warp in Bayer domain (Phase 6.1)
+# Position: after Digital Gain, before LSC.
+# ldc_enable: Brown-Conrady radial+tangential (k1<0=barrel, k1>0=pincushion)
+# cac_enable: per-channel radial scale for R and B relative to G
+# focal_length_px: 0 = use half-diagonal as normalisation radius
+# center: "auto" = image centre, or [cx_px, cy_px] in full-res pixels
+# r_ca / b_ca: CA polynomial [ca_k1, ca_k2, ca_k3] normalised to half-diagonal
+# ---------------------------------------------------------------------------
+lens_correction:
+  is_enable: false
+  ldc_enable: false
+  k1: 0.0
+  k2: 0.0
+  k3: 0.0
+  p1: 0.0
+  p2: 0.0
+  focal_length_px: 0.0
+  center: "auto"
+  cac_enable: false
+  r_ca: [0.0, 0.0, 0.0]
+  b_ca: [0.0, 0.0, 0.0]
+
+# ---------------------------------------------------------------------------
+# Purple Fringe Removal — RGB domain, after Demosaic, before CCM (Phase 6.2)
+# Detects purple/magenta halos at blown highlight edges (longitudinal CA)
+# and selectively desaturates them.
+# hue_center/hue_half_width: define the purple hue band (degrees)
+# sat_threshold: minimum saturation for fringe pixel (0-1)
+# highlight_threshold: luminance above which a pixel is "blown" (0-1)
+# desaturation_radius: dilation radius around highlights to search for fringe
+# strength: 0=no correction, 1=full desaturation of detected fringe
+# ---------------------------------------------------------------------------
+purple_fringe_removal:
+  is_enable: false
+  hue_center: 290.0
+  hue_half_width: 30.0
+  sat_threshold: 0.35
+  highlight_threshold: 0.85
+  desaturation_radius: 3
+  strength: 1.0
+

@@ -2601,6 +2601,40 @@ Key: shifts must be applied to Bayer sub-channels (half-resolution) to preserve 
 
 Future upgrade: homography (8-DOF) for rotation/perspective, using feature matching on G.
 
+**⚑ REVISIT LATER — IMU-assisted registration [2026-03-09]**
+
+During real-world burst testing on Sony ZVE10 (ISO 2000 / 4000), phase correlation worked well for small translations (±0.6 px in stable set1) but struggled with scenes containing a single dominant bright point source (lamp/window), which skews the FFT cross-correlation peak and produces anomalously large apparent shifts (±17 px in mixed-lighting set2) unrelated to global camera motion.
+
+User proposal: **integrate IMU (gyroscope/accelerometer) data as a prior for inter-frame shift estimation.** IMU angular velocity × focal length gives a first-order pixel-displacement estimate, enabling:
+
+1. **Search-window constraint** — phase correlate only within a small neighbourhood around the IMU prediction, reducing susceptibility to false peaks from bright point sources.
+2. **Outlier rejection** — if the correlation peak is far from the IMU prediction (> N px threshold), fall back to the IMU estimate directly.
+3. **Rotational correction** — pure phase correlation handles translation only. IMU roll angle enables a 3-DOF rigid warp (translation + roll) covering dominant hand-held wearable motion without full feature-based homography cost.
+4. **Sub-pixel starting point** — IMU gives a continuous displacement prior; correlation refines it to sub-pixel accuracy within a tight window.
+
+**Implementation sketch:**
+```python
+class IMUAssistedRegistration:
+    def predict_shift(self, gyro_samples, dt_s):
+        """Integrate gyro between frames → (dy_pred, dx_pred) in pixels."""
+        omega_x, omega_y = integrate_gyro(gyro_samples, dt_s)  # rad
+        return omega_x * focal_length_px, omega_y * focal_length_px
+
+    def register_with_imu(self, ref_g, target_g, imu_shift_pred, search_radius=8):
+        """Phase correlate within search_radius of imu_shift_pred."""
+        ...
+```
+
+**Config additions (when implemented):**
+```yaml
+burst_capture:
+  registration: "phase"        # "phase" | "imu_phase" | "homography"
+  imu_search_radius: 8         # px around IMU prediction to search
+  imu_outlier_threshold: 10    # px; if correlation peak > this from IMU, use IMU directly
+```
+
+Especially relevant for wearable cameras (small aperture, continuous motion, bright point sources in scene) where pure FFT registration is most likely to be misled. IMU data format assumed: timestamped (roll_rate, pitch_rate, yaw_rate) in rad/s, synchronised to frame capture timestamps.
+
 #### 5.3 — Motion detection + temporal merge
 
 ```python
@@ -2677,7 +2711,7 @@ Pipeline position: **after BNR, before AWB** (Bayer domain). Runs only in video/
 
 ---
 
-## [2026-03-09] Phase 6 — Lens Corrections (pipeline order TBD)
+## [2026-03-09] Phase 6 — Lens Corrections
 
 ### Overview
 
@@ -2685,57 +2719,86 @@ Three lens correction modules needed for wearable cameras with small, wide-angle
 
 | Module | What | Parameters | Source |
 |---|---|---|---|
-| **6.1 CAC** | Chromatic Aberration Correction — align R/B to G laterally | Per-channel radial shift coefficients | Manual config (future: calibration from chart edges) |
-| **6.2 LDC** | Lens Distortion Correction — barrel/pincushion | Radial polynomial k1, k2, k3 + tangential p1, p2 | Manual config (future: calibration from checkerboard) |
-| **6.3 Purple fringe** | Remove purple/magenta halos at blown highlight edges | Detection threshold, desaturation radius | Config: threshold, radius |
+| **6.1 LensCorrection** | Unified CAC + LDC warp in Bayer domain | Per-channel warp LUT | Manual config (future: calibration) |
+| **6.2 Purple fringe** | Remove purple/magenta halos at blown highlight edges | Hue range, sat threshold, desaturation radius | Config |
 
-### Pipeline position — open question
+### Pipeline position — **DECIDED** [2026-03-09]
 
-**⚠ DISCUSS BEFORE IMPLEMENTING — pipeline order for lens corrections.**
+**Both CAC and LDC are the same operation: inverse coordinate mapping + bilinear interpolation (a warp).** Since they are both warpers, they can and should be **composed into a single per-channel warp evaluated in the Bayer domain** before demosaic. This is architecturally superior to splitting them across domains.
 
-The correct placement of lens corrections depends on what they operate on:
+Key insight:
+- Running two sequential bilinear resamples degrades quality more than one — every resample blurs
+- LDC warp is achromatic (same for all channels); CAC warp is a per-channel differential radial scale on top of LDC
+- These compose analytically into a single source-coordinate computation per channel, requiring only **one bilinear sample per sub-channel**
+- The demosaic then sees geometrically correct AND chromatically aligned Bayer — exactly the assumption MHC and LMMSE are designed for
 
-- **CAC** must be in Bayer domain (before demosaic) — it shifts R/B sub-images relative to G
-- **LDC** can be either Bayer or RGB domain:
-  - Bayer domain: geometrically correct raw → better demosaic at edges → but must resample each sub-channel independently
-  - RGB domain (after demosaic): simpler interpolation on full-res RGB → but demosaic has already seen distorted geometry
-- **Purple fringe** operates in RGB domain (after demosaic) — detects purple pixels near blown highlights
+**Option B (CAC Bayer + LDC RGB) is rejected** because it requires two resamples and the demosaic processes geometrically distorted pixels before LDC can correct them, creating subtle colour fringing at edges.
 
-Options for pipeline order:
+### Unified warp architecture
 
 ```
-Option A — All lens corrections in Bayer (before demosaic):
-  BLC → OECF → Digital Gain → CAC → LDC → LSC → BNR → Demosaic → ...
+Input: Bayer uint16  (H × W)
+↓
+Extract 4 sub-channels at half resolution: R, Gr, Gb, B  (each H/2 × W/2)
 
-Option B — Split: CAC in Bayer, LDC + PF in RGB:
-  BLC → OECF → Digital Gain → CAC → LSC → BNR → Demosaic → LDC → PF → CCM → ...
+For each sub-channel C ∈ {R, Gr, Gb, B}:
+    warp_C = compose(ldc_coeffs, ca_delta_coeffs[C])
+    out_C  = remap(sub_channel_C, warp_C)    ← single bilinear resample
 
-Option C — All after demosaic (simpler, slightly lower quality):
-  ... → BNR → Demosaic → CAC → LDC → PF → CCM → ...
+Reconstruct Bayer from warped sub-channels
+↓
+Output: warped Bayer uint16  (H × W)  — single warp, no cascaded resampling
+→ LSC → BNR → Demosaic (sees correct geometry + aligned channels)
 ```
 
-Recommendation to discuss: **Option B** is the industry standard. CAC must be Bayer (per-channel shift). LDC in RGB is simpler and high-quality. PF needs RGB.
+Warp composition per channel:
+- G (Gr, Gb): pure LDC warp — Brown-Conrady radial+tangential
+- R: LDC warp + CA radial scale for R applied at distorted position
+- B: LDC warp + CA radial scale for B applied at distorted position
 
-### Config sketch (manual coefficients, calibration-ready)
+Purple fringe correction cannot be fused — it needs full RGB hue information — so it stays after demosaic, before CCM.
+
+### Final pipeline order
+
+```
+Digital Gain → LensCorrection (unified CAC+LDC, Bayer domain) → LSC → BNR
+→ Demosaic → PurpleFringe (RGB domain) → CCM → ...
+```
+
+### Config design (unified, calibration-ready)
 
 ```yaml
-chromatic_aberration_correction:
+lens_correction:
   is_enable: false
-  # Radial shift model: dr = k1*r + k2*r^2 + k3*r^3 (per channel)
-  r_shift: [0.0, 0.0, 0.0]          # R channel radial shift [k1, k2, k3]
-  b_shift: [0.0, 0.0, 0.0]          # B channel radial shift
-  center: "auto"                      # "auto" (image center) or [cx, cy] pixels
+  # --- Lens Distortion Correction (LDC) ---
+  # Brown-Conrady model.  All channels equally (geometric distortion is achromatic).
+  # Normalised coords: xn = (x - cx) / focal_length_px
+  ldc_enable: false
+  k1: 0.0              # radial coefficient r^2
+  k2: 0.0              # radial coefficient r^4
+  k3: 0.0              # radial coefficient r^6
+  p1: 0.0              # tangential coefficient
+  p2: 0.0              # tangential coefficient
+  focal_length_px: 0.0 # 0 = use image diagonal/2 as normalisation radius
+  center: "auto"       # "auto" (image centre) or [cx_px, cy_px]
+  # --- Chromatic Aberration Correction (CAC) ---
+  # Differential radial scale for R and B relative to G.
+  # Applied on top of LDC at the distorted sub-channel position.
+  # Model: additional_scale = ca_k1*r + ca_k2*r^2 + ca_k3*r^3
+  cac_enable: false
+  r_ca: [0.0, 0.0, 0.0]   # [ca_k1, ca_k2, ca_k3] for R sub-channel
+  b_ca: [0.0, 0.0, 0.0]   # [ca_k1, ca_k2, ca_k3] for B sub-channel
+  # (Gr, Gb use identity — they are the alignment reference)
 
-lens_distortion_correction:
+purple_fringe_removal:
   is_enable: false
-  # Brown-Conrady model: radial k1,k2,k3 + tangential p1,p2
-  k1: 0.0
-  k2: 0.0
-  k3: 0.0
-  p1: 0.0
-  p2: 0.0
-  focal_length_px: 1000.0            # focal length in pixels (from calibration)
-  center: "auto"
+  hue_center: 290.0          # centre of purple hue range (degrees, 0–360)
+  hue_half_width: 30.0       # ±width of hue detection band
+  sat_threshold: 0.35        # minimum saturation to qualify as fringe
+  highlight_threshold: 0.85  # luminance above which a pixel counts as a highlight
+  desaturation_radius: 3     # dilation radius (px) around highlights for fringe search
+  strength: 1.0              # 0=no correction, 1=full desaturation
+```
 
 purple_fringe_removal:
   is_enable: false

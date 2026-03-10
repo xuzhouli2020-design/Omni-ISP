@@ -7,7 +7,7 @@ Description: Applies the 3x3 correction matrix on the image.
                "xyz"     — two-step camera→XYZ→target_primaries pipeline using standard
                            CIE matrices from xyz_matrices.py (Phase 3.1)
 Code / Paper  Reference: https://www.imatest.com/docs/colormatrix/
-Author: 10xEngineers Pvt Ltd  /  EdgeISP Phase 3.1 extension
+Author: 10xEngineers Pvt Ltd  /  Omni-ISP Phase 3.1 extension
 ------------------------------------------------------------
 
 XYZ mode config keys (all optional, default = backward-compat):

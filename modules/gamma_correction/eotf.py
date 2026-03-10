@@ -18,7 +18,7 @@ responsibility.
 
 Ref: docs/dev_notes.md "CCM target primaries + Gamma EOTF — multi-format output"
 
-Author: EdgeISP / 10xEngineers Pvt Ltd
+Author: Omni-ISP / 10xEngineers Pvt Ltd
 """
 import numpy as np
 

@@ -49,7 +49,7 @@ class AFSearchMachine:
     Stateful contrast-detect AF search machine.
 
     Instantiate once and call update() for every new frame.
-    Persist this object across pipeline execute() calls in InfiniteISP.
+    Persist this object across pipeline execute() calls in OmniISP.
 
     Parameters
     ----------

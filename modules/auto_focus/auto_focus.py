@@ -1,7 +1,7 @@
 """
 File: auto_focus.py
 Description: Auto-Focus pipeline module — wraps AFSearchMachine and focus-metric
-             computation into the standard EdgeISP module interface.
+             computation into the standard Omni-ISP module interface.
 
 Role in pipeline
 ────────────────

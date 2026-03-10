@@ -20,7 +20,7 @@ Config keys used (all optional, with sensible defaults):
   edge_max          float  0.15   Normalised edge strength at which gain = gain_max
   halo_limit        float  0.1    Mask clip value for halo suppression (normalised)
 
-Author: EdgeISP / 10xEngineers Pvt Ltd
+Author: Omni-ISP / 10xEngineers Pvt Ltd
 """
 import numpy as np
 

@@ -5,7 +5,7 @@ Description: LMMSE (Linear Minimum Mean Square Error) demosaicing.
              approach based on Zhang & Wu, "Color demosaicking via directional linear
              minimum mean square-error estimation," IEEE TIP, 2005.
              Pure NumPy — no scipy required.
-Author: EdgeISP (10xEngineers fork)
+Author: Omni-ISP (10xEngineers fork)
 ------------------------------------------------------------
 Algorithm outline
 -----------------

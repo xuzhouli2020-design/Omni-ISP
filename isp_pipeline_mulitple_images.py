@@ -6,7 +6,7 @@ It also fetches if a separate config of a raw image is present othewise uses the
 import os
 from pathlib import Path
 from tqdm import tqdm
-from infinite_isp import InfiniteISP
+from omni_isp import OmniISP
 
 from util.config_utils import parse_file_name, extract_raw_metadata
 
@@ -27,16 +27,16 @@ def video_processing():
     raw_files = [f_name for f_name in os.listdir(DATASET_PATH) if ".raw" in f_name]
     raw_files.sort()
 
-    infinite_isp = InfiniteISP(DATASET_PATH, CONFIG_PATH)
+    omni_isp = OmniISP(DATASET_PATH, CONFIG_PATH)
 
     # set generate_tv flag to false
-    infinite_isp.c_yaml["platform"]["generate_tv"] = False
-    infinite_isp.c_yaml["platform"]["render_3a"] = False
+    omni_isp.c_yaml["platform"]["generate_tv"] = False
+    omni_isp.c_yaml["platform"]["render_3a"] = False
 
     for file in tqdm(raw_files, disable=False, leave=True):
 
-        infinite_isp.execute(file)
-        infinite_isp.load_3a_statistics()
+        omni_isp.execute(file)
+        omni_isp.load_3a_statistics()
 
 
 def dataset_processing():
@@ -60,10 +60,10 @@ def dataset_processing():
         if (Path(DATASET_PATH, x).suffix in [".raw", ".NEF", ".dng", ".nef"])
     ]
 
-    infinite_isp = InfiniteISP(DATASET_PATH, default_config)
+    omni_isp = OmniISP(DATASET_PATH, default_config)
 
     # set generate_tv flag to false
-    infinite_isp.c_yaml["platform"]["generate_tv"] = False
+    omni_isp.c_yaml["platform"]["generate_tv"] = False
 
     is_default_config = True
 
@@ -78,16 +78,16 @@ def dataset_processing():
             print(f"Found {config_file}.")
 
             # use raw config file in dataset
-            infinite_isp.load_config(DATASET_PATH + config_file)
+            omni_isp.load_config(DATASET_PATH + config_file)
             is_default_config = False
-            infinite_isp.execute()
+            omni_isp.execute()
 
         else:
             print(f"Not Found {config_file}, Changing filename in default config file.")
 
             # copy default config file
             if not is_default_config:
-                infinite_isp.load_config(default_config)
+                omni_isp.load_config(default_config)
                 is_default_config = True
 
             if EXTRACT_SENSOR_INFO:
@@ -98,21 +98,21 @@ def dataset_processing():
                     )
                     sensor_info = parse_file_name(raw)
                     if sensor_info:
-                        infinite_isp.update_sensor_info(sensor_info)
+                        omni_isp.update_sensor_info(sensor_info)
                         print("updated sensor_info into config")
                     else:
                         print("No information in filename - sensor_info not updated")
                 else:
                     sensor_info = extract_raw_metadata(DATASET_PATH + raw)
                     if sensor_info:
-                        infinite_isp.update_sensor_info(sensor_info, UPDATE_BLC_WB)
+                        omni_isp.update_sensor_info(sensor_info, UPDATE_BLC_WB)
                         print("updated sensor_info into config")
                     else:
                         print(
                             "Not compatible file for metadata - sensor_info not updated"
                         )
 
-            infinite_isp.execute(raw)
+            omni_isp.execute(raw)
 
 
 def find_files(filename, search_path):

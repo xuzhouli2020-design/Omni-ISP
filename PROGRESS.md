@@ -1,6 +1,6 @@
-# EdgeISP — Implementation Roadmap
+# Omni-ISP — Implementation Roadmap
 
-Status: **Phase 1–3 output system complete (180 tests); Phase 4–8 planned; factory calibration deferred**
+Status: **Phases 1–3 + Phase 5 + Phase 6 complete (322 tests); Phase 4 (3A) and Phase 7–8 planned; factory calibration deferred**
 Last updated: 2026-03-09
 
 ---
@@ -132,7 +132,7 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
   - `util/output_profile.py`: 6 named profiles (srgb, rec709, display_p3, hdr10, hlg, linear)
   - Each profile bundles (ccm_mode, ccm_target, gamma_eotf) — always consistent
   - `apply_profile_to_params()` mutates parm_ccm + parm_gmc before module execution
-  - Wired into `InfiniteISP.__init__()` after config loading
+  - Wired into `OmniISP.__init__()` after config loading
   - `output.profile: "custom"` (default) is a no-op — backward compat preserved
   - Config: new `output:` section with `profile` key at end of configs.yml
   - Ref: dev_notes.md "CCM and EOTF are coupled — use output profiles"
@@ -221,66 +221,68 @@ Design spec preserved in dev_notes.md "Calibration Module — Design Proposal" [
 
 ---
 
-## Phase 5 — Multi-frame Pipeline [NOT STARTED]
+## Phase 5 — Multi-frame Pipeline [COMPLETE — 2026-03-09]
 
 ### Burst capture denoising
 
-- [ ] **5.1 Raw stack loader** — load N raw frames, apply BLC+OECF to each
-  - Reuse existing BLC/OECF module classes per frame
-  - Output: (N, H, W) uint16 Bayer stack
-  - Ref: dev_notes.md "Phase 5 — Multi-frame Pipeline"
+- [x] **5.1 Raw stack loader** — `modules/burst_capture/raw_stack_loader.py`
+  - `RawStackLoader.load()` → (N, H, W) uint16 Bayer stack
+  - Per-frame BLC-offset + OECF preprocessing using existing modules
+  - Supports `.raw` (uint8/uint16) and libraw formats (rawpy)
 
-- [ ] **5.2 Phase correlation registration** — align frames to reference (frame 0)
-  - FFT cross-correlation on G channel, subpixel translation
-  - Bayer-aware shift (per sub-channel interpolation to preserve CFA pattern)
-  - Pure NumPy — no OpenCV dependency
-  - Future: homography upgrade for rotation/perspective
-  - Ref: dev_notes.md "5.2 — Phase correlation registration"
+- [x] **5.2 Phase correlation registration** — `modules/burst_capture/burst_registration.py`
+  - `phase_correlate(ref_g, target_g)` → (dy, dx) subpixel translation
+  - Parabolic peak refinement for sub-pixel accuracy
+  - `apply_shift_bayer()` — Bayer-aware shift (sub-channel shift = shift/2)
+  - scipy.ndimage.shift if available; pure NumPy integer fallback
+  - `register_stack()` — aligns all N frames to reference
 
-- [ ] **5.3 Motion detection + temporal merge**
-  - Per-block SAD motion mask (16×16 or 32×32 blocks)
-  - Weighted merge: static=mean (√N SNR), moving=reference only, boundary=blend
-  - Ref: dev_notes.md "5.3 — Motion detection + temporal merge"
+- [x] **5.3 Motion detection + temporal merge** — `modules/burst_capture/burst_merge.py`
+  - `detect_motion()` — per-block SAD on green channel → (N, H, W) float32 masks
+  - `temporal_merge()` — weighted_mean / mean / median
+  - `merge_burst()` — top-level convenience: detect → merge
+  - Static regions: mean of all N frames (√N SNR gain)
+  - Moving regions: reference frame only (no ghosting)
 
-- [ ] **5.4 Pipeline integration** — wire burst path into infinite_isp.py
-  - `burst_capture.is_enable` config: when true, loads N frames → register → merge → continue
-  - Merged Bayer enters pipeline at BNR stage
-  - AE interaction: burst mode prefers lower per-frame gain, more frames
-  - Ref: dev_notes.md "5.4 — Pipeline integration"
+- [x] **5.4 Pipeline integration** — `infinite_isp.py`
+  - `set_burst_stack(stack)` — supply pre-loaded stack before `execute()`
+  - Burst merge positioned after OECF, before BLC linearise
+  - `burst_capture` config section in `config/configs.yml`
+  - TNR wired after BNR, before Stats3A; `_tnr_state` persisted between frames
 
 ### Temporal Noise Reduction (video)
 
-- [ ] **5.5 TNR: IIR temporal filter**
-  - `temporal_nr.py`: per-pixel IIR blend with motion masking
-  - Static pixels: α-blend with previous output (temporal smoothing)
-  - Moving pixels: use current frame (no ghosting)
-  - Position: Bayer domain after BNR, before AWB (video/continuous mode only)
-  - Config: `temporal_nr.is_enable: false`, `alpha`, `motion_threshold`
-  - Ref: dev_notes.md "5.5 — Temporal Noise Reduction"
+- [x] **5.5 TNR: IIR temporal filter** — `modules/temporal_nr/temporal_nr.py`
+  - `TemporalNR` class with `TNRState` persistence dataclass
+  - Per-pixel IIR EMA: `(1-α)*current + α*prev` for static pixels
+  - Motion detection: frame-difference on downsampled green channel
+  - Morphological erosion of static mask (prevents ghosting at edges)
+  - `temporal_nr` config section; off by default
 
 ---
 
-## Phase 6 — Lens Corrections [NOT STARTED — pipeline order TBD]
+## Phase 6 — Lens Corrections [COMPLETE — 2026-03-09]
 
-**⚠ Pipeline order discussion needed before implementation** — see dev_notes.md "Phase 6"
+**Key design decision**: CAC and LDC are both warpers (inverse coordinate remapping + bilinear interpolation). They are composed analytically into a **single per-channel warp in the Bayer domain**, requiring only one bilinear resample per sub-channel instead of two. This avoids cascaded resampling quality loss and ensures the demosaicker always sees a geometrically correct AND chromatically aligned Bayer image. See dev_notes.md "Phase 6 — Lens Corrections".
 
-- [ ] **6.1 Chromatic Aberration Correction (CAC)**
-  - Per-channel radial shift to align R/B to G
-  - Bayer domain (before demosaic) — shifts R/B sub-images
-  - Config: `r_shift: [k1, k2, k3]`, `b_shift: [k1, k2, k3]`
-  - Manual coefficients now; calibration-ready for future
+- [x] **6.1 + 6.2 Unified CAC + LDC warp** — `modules/lens_correction/`
+  - `warp_field.py`: Brown-Conrady LDC warp composed with per-channel CAC radial scale into single `(rows_src, cols_src)` map per Bayer sub-channel
+  - `lens_correction.py`: `LensCorrection` class, Bayer domain (after Digital Gain, before LSC)
+  - Supports all four Bayer patterns (RGGB, BGGR, GRBG, GBRG)
+  - Bilinear remap via `scipy.ndimage.map_coordinates` (pure NumPy fallback)
+  - Config: `lens_correction:` section with `ldc_enable`, `cac_enable`, `k1/k2/k3/p1/p2`, `r_ca`, `b_ca`, `focal_length_px`, `center`
+  - All disabled by default (backward compat)
 
-- [ ] **6.2 Lens Distortion Correction (LDC)**
-  - Brown-Conrady radial+tangential model
-  - RGB domain (after demosaic) — simpler interpolation
-  - Config: `k1, k2, k3, p1, p2, focal_length_px`
-  - Manual coefficients now; future checkerboard calibration
+- [x] **6.3 Purple Fringe Removal** — `modules/purple_fringe_removal/`
+  - `purple_fringe_removal.py`: `PurpleFringeRemoval` class, RGB domain (after Demosaic, before CCM)
+  - Hue-band detection (configurable center+width) + saturation threshold + highlight proximity (dilated mask)
+  - Pure-NumPy 4-connected binary dilation, vectorised RGB↔HSV conversion
+  - Config: `purple_fringe_removal:` section with `hue_center`, `hue_half_width`, `sat_threshold`, `highlight_threshold`, `desaturation_radius`, `strength`
+  - Disabled by default (backward compat)
 
-- [ ] **6.3 Purple Fringe Removal**
-  - Detect high-saturation purple pixels near blown highlights
-  - Selective desaturation in HSV/Lab space
-  - RGB domain (after demosaic)
-  - Config: `detection_threshold`, `desaturation_radius`
+- [x] **6.4 Tests** — `tests/test_lens_correction.py` (39 tests)
+  - `TestWarpField` (10), `TestLensCorrection` (12), `TestPurpleFringeRemoval` (11), `TestPipelineIntegration` (5+1)
+  - All 39 passing; full suite: 322 tests across 8 suites, all passing
 
 ---
 
@@ -351,4 +353,4 @@ Design spec in dev_notes.md "Calibration Module — Design Proposal" [2026-03-06
 - **Config-driven**: every new feature is a config flag, never a hardcoded change
 - **dev_notes.md is the spec**: every item above references a section in `docs/dev_notes.md` with full technical rationale, algorithm detail, and config YAML design
 - **Testing**: after each change, run `python isp_pipeline.py` and verify output in `out_frames/`
-- **Test suites**: test_phase1.py (27), test_phase2.py (24), test_phase3.py (46), test_phase4.py (38), test_phase5.py (45) — 180 total tests, all passing
+- **Test suites**: test_phase1.py (27), test_phase2.py (24), test_phase3.py (46), test_phase4.py (38), test_phase5.py (45), test_3a.py (60), test_phase6.py (43), test_lens_correction.py (39) — 322 total tests, all passing

@@ -10,7 +10,7 @@ Code / Paper  Reference:
   - PCA       : https://opg.optica.org/josaa/viewmedia.cfm?uri=josaa-31-5-1049&seq=0
   - Gray Edge : van de Weijer et al., "Edge-Based Color Constancy", IEEE TIP 2007.
 
-Author: 10xEngineers Pvt Ltd (original); EdgeISP extensions — Phase 4.4/4.5
+Author: 10xEngineers Pvt Ltd (original); Omni-ISP extensions — Phase 4.4/4.5
 ------------------------------------------------------------
 """
 import time

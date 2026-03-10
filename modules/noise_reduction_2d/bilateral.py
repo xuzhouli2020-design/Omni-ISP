@@ -22,7 +22,7 @@ Config keys
   y_intensity_sigma float  0.05  Range Gaussian sigma (normalised to [0,1])
   window_size       int    7     Search window side length (odd)
 
-Author: EdgeISP / 10xEngineers Pvt Ltd
+Author: Omni-ISP / 10xEngineers Pvt Ltd
 """
 import numpy as np
 

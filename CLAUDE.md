@@ -2,7 +2,7 @@
 
 ## Project Identity
 
-**EdgeISP** — an open-source Image Signal Processing pipeline for wearable and embedded cameras, built on [Infinite-ISP](https://github.com/10xEngineers/Infinite-ISP) by 10xEngineers. The project has three pillars:
+**Omni-ISP** — an open-source Image Signal Processing pipeline for wearable and embedded cameras, built on [Infinite-ISP](https://github.com/10xEngineers/Infinite-ISP) by 10xEngineers. The project has three pillars:
 
 1. **Better pipeline** — algorithmic upgrades with configurable speed/quality trade-offs
 2. **Calibration guidance** — standalone calibration module for sensor characterisation
@@ -14,7 +14,7 @@
 ## Repository Structure
 
 ```
-├── infinite_isp.py           # Main pipeline class — module execution order defined here
+├── omni_isp.py               # Main pipeline class — module execution order defined here
 ├── isp_pipeline.py           # CLI entry point
 ├── config/
 │   └── configs.yml           # All module parameters — single source of truth

@@ -1,6 +1,6 @@
 """
 File: sharpen.py
-Description: Implements sharpening for Infinite-ISP.
+Description: Implements sharpening for Omni-ISP.
 Code / Paper  Reference:
 Author: 10xEngineers Pvt Ltd
 

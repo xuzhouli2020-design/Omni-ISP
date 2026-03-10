@@ -1,5 +1,5 @@
 """
-EdgeISP — Phase 2 Regression Tests
+Omni-ISP — Phase 2 Regression Tests
 =====================================
 Tests for Phase 2 algorithm upgrades:
   - 2.1  DPC: MAD-based adaptive threshold (dynamic_dpc.py)

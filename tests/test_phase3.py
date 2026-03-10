@@ -65,7 +65,7 @@ _tqdm_mod = types.ModuleType("tqdm")
 _tqdm_mod.tqdm = lambda iterable, **kw: iterable
 sys.modules.setdefault("tqdm", _tqdm_mod)
 
-# rawpy (used only by infinite_isp.py loader — not needed here)
+# rawpy (used only by omni_isp.py loader — not needed here)
 sys.modules.setdefault("rawpy", MagicMock())
 sys.modules.setdefault("yaml", MagicMock())
 

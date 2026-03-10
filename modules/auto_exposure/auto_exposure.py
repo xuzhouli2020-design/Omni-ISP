@@ -20,7 +20,7 @@ Mode selection:
 Code / Paper Reference:
   - Original: https://www.atlantis-press.com/article/25875811.pdf
   - AE zone metering: standard camera AE textbooks
-Author: 10xEngineers Pvt Ltd (original); EdgeISP Phase 4.2/4.3 extensions
+Author: 10xEngineers Pvt Ltd (original); Omni-ISP Phase 4.2/4.3 extensions
 ------------------------------------------------------------
 """
 import time
@@ -127,7 +127,7 @@ class AutoExposure:
         return result
 
     # ------------------------------------------------------------------
-    # Legacy path (original Infinite-ISP algorithm)
+    # Legacy path (original Omni-ISP algorithm)
     # ------------------------------------------------------------------
 
     def _legacy_step(self) -> int:

@@ -1,5 +1,5 @@
 """
-EdgeISP — Phase 4: 3A Algorithm Tests
+Omni-ISP — Phase 4: 3A Algorithm Tests
 =======================================
 Covers:
   4.1  Stats3ACollector
