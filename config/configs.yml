@@ -30,6 +30,7 @@ dead_pixel_correction:
 
 black_level_correction:
   is_enable: true
+  # Fixed offsets — used when use_ob_pixels: false (default, backward compat)
   r_offset: 200
   gr_offset: 200
   gb_offset: 200
@@ -39,6 +40,14 @@ black_level_correction:
   gr_sat: 4095
   gb_sat: 4095
   b_sat: 4095
+  # Optical black pixel auto-estimation (Phase 2.7)
+  # Set use_ob_pixels: true when the sensor exports an OB pixel region.
+  # The estimated per-channel (or per-column) offsets override the fixed values above.
+  use_ob_pixels: false          # true = estimate BL from OB region each capture
+  ob_rows: 8                    # number of OB rows prepended at top of raw frame
+  ob_cols: 0                    # number of OB columns at left of raw frame (0 = none)
+  ob_correction_mode: "scalar"  # "scalar" | "per_column" | "per_row"
+  ob_smoothing: "median"        # "median" (robust) | "mean"
   is_save: false
 
 oecf:
@@ -73,14 +82,49 @@ bayer_noise_reduction:
   b_std_dev_r: 0.1
   is_save: false
 
+# ---------------------------------------------------------------------------
+# 3A Statistics Collector (Phase 4.1)
+# Shared Bayer-domain stats pass; runs after BNR, before AWB.
+# ---------------------------------------------------------------------------
+3a_stats:
+  is_enable: true
+  zone_grid: 16           # NxN luminance zone grid (AE metering)
+  hist_bins: 256          # histogram bins per zone
+  af_roi: [0.33, 0.33, 0.67, 0.67]   # AF ROI: [x0,y0,x1,y1] in [0,1] normalised coords
+  grad_order: 1           # gradient order: 1=Sobel, 2=Laplacian (for Gray Edge AWB)
+  minkowski_norm: 1       # p-norm for gradient accumulation
+
+# ---------------------------------------------------------------------------
+# Auto Focus (Phase 4.8)
+# Passive module — does not modify the image. Outputs recommended lens position.
+# Host must move the physical actuator to recommended_position before next frame.
+# ---------------------------------------------------------------------------
+auto_focus:
+  is_enable: false        # disabled by default (passive ISP mode)
+  lens_range: 100         # total actuator steps (0=infinity, max=macro)
+  coarse_steps: 10        # positions sampled in coarse sweep
+  fine_steps: 5           # half-steps around coarse peak for fine search
+  tracking_threshold: 0.05  # relative metric drop fraction to re-trigger
+  metric: "tenengrad"     # "tenengrad" | "laplacian_var"
+  trigger_on_start: true  # trigger a full search when AF is first enabled
+
 auto_white_balance:
   is_enable: true
   is_debug: true
   underexposed_percentage: 5
   overexposed_percentage: 5
+  # algorithm: "gray_world" | "norm_2" | "pca" | "gray_edge"
   algorithm: "norm_2"
-  # grey_world, norm_2, pca
-  percentage: 3.5 # pca
+  percentage: 3.5         # pca only
+  # Gray Edge parameters (Phase 4.4) — active when algorithm: "gray_edge"
+  grad_order: 1           # 1=Sobel, 2=Laplacian
+  minkowski_p: 1.0        # Minkowski p-norm for gradient mean
+  sat_threshold: 0.95     # exclude pixels brighter than this fraction of full scale
+  dark_threshold: 0.05    # exclude pixels darker than this fraction
+  min_gain: 1.0           # minimum gain (gains < this clamped to 1.0)
+  max_gain: 4.0           # maximum gain clamp
+  # Temporal gain damping (Phase 4.5): 0.0=instant update, 0.7=heavy smoothing
+  temporal_damping: 0.0
 
 white_balance:
   is_enable: true
@@ -92,14 +136,31 @@ white_balance:
   is_save: false
 
 demosaic:
+  # demosaic_method: "mhc"   — Malvar-He-Cutler (default, backward compat)
+  # demosaic_method: "lmmse" — LMMSE directional (+~1.5 dB, pure NumPy, no scipy)
+  demosaic_method: "mhc"
   is_save: false
 
 color_correction_matrix:
   #Row sum to 1 convention
   is_enable: true
+  # Phase 3.1: architecture mode
+  #   "direct" — single-step camera→sRGB from corrected_red/green/blue (default, backward compat)
+  #   "xyz"    — two-step camera→XYZ→target using standard CIE matrices
+  mode: "direct"
+  # Direct mode matrix rows (row-sum-to-1 / imatest convention):
   corrected_red: [1.660, -0.527, -0.133]
   corrected_green: [-0.408, 1.563, -0.082]
   corrected_blue: [-0.055, -1.641, 2.695]
+  # XYZ mode settings (used only when mode: "xyz"):
+  #   target: output colour space — "srgb" | "display_p3" | "bt2020" | "xyz"
+  target: "srgb"
+  #   camera_to_xyz_*: camera→CIE XYZ matrix rows (D65). If absent, derived
+  #   automatically from corrected_red/green/blue via sRGB→XYZ composition.
+  #   Provide measured values from colorimetric calibration for best accuracy.
+  # camera_to_xyz_red:   [0.4124564, 0.3575761, 0.1804375]
+  # camera_to_xyz_green: [0.2126729, 0.7151522, 0.0721750]
+  # camera_to_xyz_blue:  [0.0193339, 0.1191920, 0.9503041]
   is_save: false
 
 gamma_correction:
@@ -119,8 +180,31 @@ gamma_correction:
 auto_exposure:
   is_enable: true
   is_debug: true
+  # Mode: "legacy" (original skewness feedback) | "zone_metering" (industry-grade)
+  mode: "legacy"
+  # --- Legacy parameters (used when mode: "legacy") ---
   center_illuminance: 90
   histogram_skewness: 0.9
+  # --- Zone metering parameters (Phase 4.2/4.3, used when mode: "zone_metering") ---
+  # Metering mode: "center_weighted" | "spot" | "matrix"
+  metering_mode: "center_weighted"
+  spot_fraction: 0.25         # fraction of frame edge for spot zone
+  highlight_weight: 2.0       # matrix mode: penalty for blown zones
+  target_brightness: 0.18     # target scene brightness [0,1] (18% grey)
+  tolerance_ev: 0.15          # dead-band ± EV before correction triggers
+  kp: 0.5                     # proportional gain (0.5 = half-step per frame)
+  # Exposure triangle limits
+  shutter_min_us: 100.0       # minimum shutter in microseconds
+  shutter_max_us: 33333.0     # maximum shutter (~30 fps, 1/30s)
+  analog_gain_min_db: 0.0     # minimum analog gain (0 dB = ×1)
+  analog_gain_max_db: 24.0    # maximum analog gain (24 dB ≈ ×16)
+  digital_gain_max: 4.0       # maximum digital gain multiplier
+  # Flicker avoidance: "none" | "50hz" | "60hz"
+  flicker_avoidance: "none"
+  # Exposure priority: "auto" | "shutter" | "iso"
+  exposure_priority: "auto"
+  shutter_fixed_us: 10000.0   # used when priority="shutter" (10ms = 1/100s)
+  analog_gain_fixed_db: 0.0   # used when priority="iso"
 
 
 color_space_conversion: 
@@ -140,8 +224,17 @@ color_saturation_enhancement:
 
 ldci:
   is_enable: false
+  # mode: "clahe"          — original tile-based CLAHE (default, backward compat)
+  # mode: "guided_filter"  — edge-preserving Guided Filter LTM (no tile artefacts)
+  mode: "clahe"
+  # CLAHE parameters (existing)
   clip_limit: 1
   wind: 16
+  # Guided Filter LTM parameters (used when mode: "guided_filter")
+  guided_radius: 64       # base-layer smoothing radius in pixels (larger = stronger LTM)
+  guided_eps: 0.01        # edge sensitivity on [0,1]-normalised Y (smaller = sharper base)
+  detail_gain: 1.5        # amplification of detail layer (1.0 = no enhancement)
+  base_compression: 0.7   # power-law exponent on base layer (< 1.0 lifts shadows)
   is_save: false
 
 sharpen:
@@ -190,4 +283,30 @@ yuv_conversion_format:
   is_enable: false
   conv_type: '444'      # '444' | '422' (YUYV packed) | '420' (I420 planar, new)
   is_save: false
+
+# Phase 3.3: Output profile — bundles CCM target + Gamma EOTF so they are always in sync.
+# Overrides color_correction_matrix.mode/target and gamma_correction.eotf.
+# Set profile: "custom" (or remove this section) to control each module individually.
+#
+#  Profile       CCM target      EOTF         Use case
+#  ─────────     ──────────      ────         ────────
+#  srgb          BT.709          sRGB         Default — SDR web, PNG, JPEG
+#  rec709        BT.709          Rec.709      Broadcast SDR video
+#  display_p3    DCI-P3/D65      sRGB         Wide-colour SDR (phones, Mac)
+#  hdr10         BT.2020         PQ/ST.2084   HDR10 video (10-bit+)
+#  hlg           BT.2020         HLG          HDR broadcast
+#  linear        BT.709          γ=1.0        ML pipelines / scientific
+#  custom        (per-module)    (per-module) Manual control — no override
+output:
+  profile: "custom"    # "srgb"|"rec709"|"display_p3"|"hdr10"|"hlg"|"linear"|"custom"
+  # Phase 3.4: dithering before 8-bit quantisation
+  #   "none"        — plain rounding (original behaviour, default for backward compat)
+  #   "tpdf"        — triangular noise, simple, unbiased
+  #   "blue_noise"  — void-and-cluster spatial mask, film-grain look (recommended for 8-bit)
+  dither: "none"
+  # Phase 3.5: output file format
+  #   "png"   — lossless (default)
+  #   "jpeg"  — lossy, smaller file; use jpeg_quality to control
+  format: "png"
+  jpeg_quality: 95      # 1–95; used only when format="jpeg"
 

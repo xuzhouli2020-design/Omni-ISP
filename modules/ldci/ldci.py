@@ -7,11 +7,16 @@ Author: 10xEngineers
 import time
 from util.utils import save_output_array_yuv
 from modules.ldci.clahe import CLAHE
+from modules.ldci.guided_filter_ltm import GuidedFilterLTM
 
 
 class LDCI:
     """
     Local Dynamic Contrast Enhancement
+
+    mode: "clahe"          — original CLAHE bilinear tile method (default)
+    mode: "guided_filter"  — Guided Filter Local Tone Mapping (high quality,
+                             edge-aware, no tile artefacts, pure NumPy)
     """
 
     def __init__(self, yuv, platform, sensor_info, parm_ldci, conv_std):
@@ -23,15 +28,20 @@ class LDCI:
         self.is_save = parm_ldci["is_save"]
         self.platform = platform
         self.conv_std = conv_std
+        # mode: "clahe" (default, backward compat) | "guided_filter"
+        self.mode = parm_ldci.get("mode", "clahe")
 
     def apply_ldci(self):
         """
-        Applying LDCI module to the given image
+        Applying LDCI module using the configured algorithm.
         """
-        clahe = CLAHE(self.yuv, self.platform, self.sensor_info, self.parm_ldci)
-        out_ceh = clahe.apply_clahe()
-
-        return out_ceh
+        if self.mode == "guided_filter":
+            gf = GuidedFilterLTM(self.yuv, self.parm_ldci)
+            return gf.apply_guided_ltm()
+        else:
+            # Default: original CLAHE path — fully backward compatible
+            clahe = CLAHE(self.yuv, self.platform, self.sensor_info, self.parm_ldci)
+            return clahe.apply_clahe()
 
     def save(self):
         """
@@ -50,7 +60,7 @@ class LDCI:
         """
         Executing LDCI module according to user choice
         """
-        print("LDCI = " + str(self.enable))
+        print(f"LDCI = {self.enable}  mode={self.mode}")
 
         if self.enable is True:
             start = time.time()

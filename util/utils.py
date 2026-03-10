@@ -229,11 +229,26 @@ def get_image_from_yuv_format_conversion(yuv_img, height, width, yuv_custom_form
 
 def save_pipeline_output(img_name, output_img, config_file):
     """
-    Saves the output image (png) and config file in OUTPUT_DIR
+    Saves the output image and config file in OUTPUT_DIR.
+
+    Phase 3.4/3.5: reads output.dither and output.format from config_file
+    to apply blue-noise dithering and select PNG vs JPEG encoding.
+    Defaults (dither="none", format="png") reproduce original behaviour.
     """
+    from util.dither import encode_8bit   # local import avoids circular dependency
 
     # Time Stamp for output filename
     dt_string = datetime.now().strftime("_%Y%m%d_%H%M%S")
+
+    # Read output section from config (all keys optional — backward compat)
+    output_cfg   = config_file.get("output", {}) if isinstance(config_file, dict) else {}
+    dither_mode  = output_cfg.get("dither",  "none")
+    out_format   = output_cfg.get("format",  "png").lower()
+    jpeg_quality = int(output_cfg.get("jpeg_quality", 95))
+
+    # --- Apply dithering ---
+    # encode_8bit handles uint8/uint16/float input; "none" mode is a no-op.
+    img_8bit = encode_8bit(output_img, dither_mode=dither_mode)
 
     # Set list format to flowstyle to dump yaml file
     yaml.add_representer(list, represent_list)
@@ -250,8 +265,18 @@ def save_pipeline_output(img_name, output_img, config_file):
             width=17000,
         )
 
-    # Save Image as .png
-    plt.imsave(OUTPUT_DIR + img_name + dt_string + ".png", output_img)
+    # --- Save image ---
+    if out_format == "jpeg" or out_format == "jpg":
+        # matplotlib imsave supports JPEG via PIL backend
+        out_path = OUTPUT_DIR + img_name + dt_string + ".jpg"
+        plt.imsave(out_path, img_8bit, format="jpeg",
+                   pil_kwargs={"quality": jpeg_quality, "optimize": True})
+        print(f"  Saved JPEG ({jpeg_quality}%): {out_path}")
+    else:
+        # Default: PNG (lossless)
+        out_path = OUTPUT_DIR + img_name + dt_string + ".png"
+        plt.imsave(out_path, img_8bit)
+        print(f"  Saved PNG: {out_path}")
 
 
 # utilities to save the config_automate exactly as config.yml

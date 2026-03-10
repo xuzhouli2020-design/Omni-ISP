@@ -2197,3 +2197,642 @@ This project extends Infinite-ISP as an **open-source, wearable/embedded-oriente
 | Target use case | Research / education | Research + wearable/embedded + production output |
 
 ---
+
+## [2026-03-09] Phase 4 — 3A Algorithm Upgrades (AE, AWB, AF)
+
+### Motivation
+
+The existing 3A implementation in Infinite-ISP is minimal:
+
+- **AE**: Histogram skewness → tri-state feedback (−1/0/+1). No zone metering, no exposure triangle, no convergence control.
+- **AWB**: Gray World / Norm-2 / PCA. All assume neutral scene average — fails on non-neutral scenes (sunset, green foliage, indoor tungsten).
+- **AF**: Does not exist.
+
+For an industry-grade wearable ISP, 3A algorithms are the **runtime config extraction layer** — they continuously adapt the pipeline to changing scene conditions. OB-pixel BLC (Phase 2.7) is one example already implemented; AE/AWB/AF complete the picture.
+
+### Architecture: shared 3A stats collector
+
+All three algorithms need per-frame statistics from the raw Bayer image. Collecting stats once and sharing them avoids redundant computation:
+
+```
+Raw Bayer (after BNR) → 3A Stats Collector
+                         ├─ Zone luminance histograms  → AE
+                         ├─ Zone colour channel means/gradients → AWB
+                         └─ ROI gradient energy → AF
+```
+
+The stats collector runs in the Bayer domain after BNR (clean signal, before demosaic). It divides the frame into an NxN grid of zones and computes:
+
+- Per-zone mean and histogram (luminance proxy = G channel or R+2G+B/4)
+- Per-zone R/G/B channel means and gradient magnitudes (for AWB)
+- Focus metric in the AF ROI (Tenengrad or Laplacian variance)
+
+**Implementation: `modules/3a_stats/stats_collector.py`**
+
+```python
+@dataclass
+class Stats3A:
+    zone_means: np.ndarray          # (N, N) luminance zone means
+    zone_histograms: np.ndarray     # (N, N, num_bins) per-zone histograms
+    global_histogram: np.ndarray    # (num_bins,) full-frame histogram
+    channel_means: dict             # {"r": float, "gr": float, "gb": float, "b": float}
+    channel_grad_means: dict        # same keys, gradient magnitudes
+    focus_metric: float             # sharpness in AF ROI
+    focus_roi: tuple                # (x0, y0, x1, y1) normalised
+
+class Stats3ACollector:
+    def __init__(self, img, sensor_info, parm_3a):
+        self.zone_grid = parm_3a.get("zone_grid", 16)
+        self.hist_bins = parm_3a.get("hist_bins", 256)
+        self.af_roi = parm_3a.get("af_roi", [0.33, 0.33, 0.67, 0.67])
+
+    def execute(self) -> Stats3A:
+        # Collect all stats in one pass over the Bayer image
+        ...
+```
+
+Config:
+```yaml
+3a_stats:
+  is_enable: true
+  zone_grid: 16                    # NxN metering grid
+  hist_bins: 256                   # histogram bin count
+  af_roi: [0.33, 0.33, 0.67, 0.67]  # normalised focus ROI
+```
+
+Pipeline position: **after BNR, before AWB** (replaces nothing, new module).
+
+---
+
+### 4.2 — AE: Industry-grade Auto-Exposure
+
+#### Design goals
+
+1. Multi-zone metering with configurable weighting (center-weighted, spot, matrix)
+2. Histogram-based highlight protection and shadow detail preservation
+3. Full exposure triangle output: shutter_us, analog_gain_db, digital_gain, aperture
+4. PID convergence controller with damping (no hunting)
+5. Flicker avoidance for 50Hz/60Hz artificial lighting
+6. EV compensation (user bias)
+
+#### Metering modes
+
+**Center-weighted**: Gaussian-weighted sum of zone luminances. Classic, predictable, good default for wearables.
+
+**Spot**: single zone (center or configurable position). For high-contrast scenes where the subject is known.
+
+**Matrix/evaluative**: weighted combination where weights are scene-adaptive. Requires a heuristic or learned weight map. For a first implementation, use fixed weights from a look-up table based on the histogram shape (backlit detection, high-key/low-key classification).
+
+#### Exposure triangle solver
+
+The AE algorithm recommends exposure settings across three axes:
+
+```
+Priority order (configurable):
+  1. Shutter time  — first choice for exposure control (optical)
+  2. Analog gain   — second choice (amplifies signal + noise)
+  3. Digital gain   — last resort (amplifies quantised signal)
+
+Constraints:
+  - shutter_min ≤ shutter_us ≤ shutter_max
+  - 0 ≤ analog_gain_db ≤ max_analog_gain_db
+  - 1.0 ≤ digital_gain ≤ max_digital_gain
+  - flicker: shutter quantised to 1/(2×flicker_freq) multiples
+```
+
+Algorithm:
+```python
+# 1. Measure current scene EV from zone stats
+ev_measured = compute_scene_ev(stats.zone_means, metering_weights)
+
+# 2. Target EV = metering_target + ev_compensation
+ev_target = target_brightness + ev_compensation
+
+# 3. EV error
+ev_error = ev_target - ev_measured
+
+# 4. PID step (damped)
+ev_step = Kp * ev_error + Ki * integral + Kd * derivative
+ev_step = clamp(ev_step, -max_step_ev, +max_step_ev)
+
+# 5. Distribute EV step across exposure triangle
+#    Prefer shutter change first, then gain, then digital gain
+new_shutter, new_gain, new_dgain = solve_triangle(
+    current_shutter, current_gain, current_dgain,
+    ev_step, constraints, flicker_freq
+)
+```
+
+#### Output
+
+```python
+@dataclass
+class AEResult:
+    target_shutter_us: float       # recommended shutter time
+    target_analog_gain_db: float   # recommended analog gain
+    digital_gain: float            # immediate digital gain for this frame
+    ev_measured: float             # current scene EV
+    ev_target: float               # target EV after compensation
+    converged: bool                # within hysteresis band
+    highlight_clip_pct: float      # % pixels near saturation
+    metering_mode: str             # which mode was used
+```
+
+The pipeline applies `digital_gain` immediately via the existing Digital Gain module. The host/driver reads shutter and analog gain fields and adjusts hardware for the next capture.
+
+#### Config
+
+```yaml
+auto_exposure:
+  is_enable: true
+  metering_mode: "center_weighted"    # "center_weighted" | "spot" | "matrix"
+  target_brightness: 0.45             # target mean luminance [0,1] (gamma domain)
+  ev_compensation: 0.0                # user bias in EV
+  max_analog_gain_db: 36.0            # sensor maximum
+  max_digital_gain: 8.0               # pipeline maximum
+  shutter_min_us: 100                 # minimum shutter time (μs)
+  shutter_max_us: 33333               # maximum (30fps = 33ms)
+  flicker_freq: 0                     # 0=off, 50 or 60 Hz
+  convergence_speed: 0.3              # PID proportional gain (Kp)
+  hysteresis_ev: 0.1                  # don't adjust if error < this
+```
+
+#### Pipeline position
+
+AE currently runs **after Gamma** (line 279). This is actually acceptable — AE needs to evaluate perceived brightness, which is gamma-domain. The output (exposure metadata) feeds into the **next frame**, not this one. The digital gain output feeds back into the Digital Gain module on the next frame.
+
+However, an industry AE should also collect stats in the **Bayer domain** (for highlight clipping detection on raw data). The 3A Stats Collector provides this. So AE uses both:
+- 3A Stats (Bayer domain) → highlight clip detection, raw histogram
+- Post-Gamma luminance → perceived brightness target (existing location)
+
+---
+
+### 4.3 — AWB: Gray Edge + temporal damping
+
+#### Gray Edge algorithm
+
+The Gray Edge hypothesis (van de Weijer et al., 2007): the average of image gradients is achromatic under the unknown illuminant. More robust than Gray World because gradients are less affected by scene content distribution.
+
+```python
+def gray_edge(bayer_channels, order=1, minkowski_p=1):
+    """
+    Estimate illuminant from image gradients in Bayer domain.
+
+    Parameters
+    ----------
+    bayer_channels : dict  {"r": 2D, "gr": 2D, "gb": 2D, "b": 2D}
+    order : int  1 = Sobel (first derivative), 2 = Laplacian (second)
+    minkowski_p : int  Minkowski norm (1=L1, 6=near max, ∞=White Patch)
+
+    Returns
+    -------
+    r_gain, b_gain : float
+    """
+    for ch_name, ch_img in bayer_channels.items():
+        if order == 1:
+            gx = sobel_h(ch_img)
+            gy = sobel_v(ch_img)
+            grad_mag = np.abs(gx) + np.abs(gy)
+        elif order == 2:
+            grad_mag = np.abs(laplacian(ch_img))
+
+        # Minkowski p-norm mean
+        mean_grad[ch_name] = (np.mean(grad_mag ** minkowski_p)) ** (1.0 / minkowski_p)
+
+    # Green reference (average Gr and Gb)
+    mean_g = (mean_grad["gr"] + mean_grad["gb"]) / 2.0
+    r_gain = mean_g / (mean_grad["r"] + eps)
+    b_gain = mean_g / (mean_grad["b"] + eps)
+    return r_gain, b_gain
+```
+
+Key properties:
+- `order=1, p=1` is standard Gray Edge (robust default)
+- `order=0, p=1` degenerates to Gray World (backward compat)
+- `order=1, p=6` approximates White Patch on gradients
+- Operates on Bayer sub-channels directly (no demosaic needed)
+
+#### Temporal damping
+
+For video or burst capture, WB gains must be temporally smooth:
+
+```python
+# IIR filter: gain_t = α × gain_new + (1-α) × gain_prev
+# α = temporal_damping config value
+# α = 0.0 → instant response (current behaviour, for single-shot)
+# α = 0.7 → smooth transitions (recommended for video)
+# α = 1.0 → frozen (AE lock equivalent for WB)
+```
+
+This requires the AWB module to maintain state across frames. For single-shot mode (current pipeline), damping is 0 (no history).
+
+#### Config additions
+
+```yaml
+auto_white_balance:
+  is_enable: true
+  algorithm: "gray_edge"              # "gray_world" | "norm_2" | "pca" | "gray_edge"
+  edge_order: 1                       # Gray Edge: 1=Sobel, 2=Laplacian
+  minkowski_norm: 1                   # p-norm (1=L1, 6≈max)
+  temporal_damping: 0.0               # IIR coefficient (0=instant, 0.7=smooth video)
+  underexposed_percentage: 5
+  overexposed_percentage: 5
+```
+
+---
+
+### 4.4 — AF: Contrast-Detect Auto-Focus
+
+#### Motivation
+
+Future wearable cameras will use voice-coil or MEMS-actuated AF lenses. The ISP needs to provide focus metric and lens position recommendations. Even for fixed-focus systems, the AF module provides a focus quality score useful for bad-frame detection.
+
+#### Focus metrics
+
+Two metrics, selectable via config:
+
+**Tenengrad** (Sobel gradient magnitude):
+```python
+def tenengrad(img_roi):
+    gx = sobel_h(img_roi)
+    gy = sobel_v(img_roi)
+    return np.mean(gx**2 + gy**2)
+```
+Robust to noise, well-correlated with subjective sharpness. Industry standard.
+
+**Laplacian variance**:
+```python
+def laplacian_var(img_roi):
+    lap = laplacian(img_roi)
+    return np.var(lap)
+```
+Simpler, slightly less robust to noise. Good for fast evaluation.
+
+#### Search strategy — state machine
+
+```
+               ┌──────────────────────────────┐
+               │         IDLE                  │
+               │  (AF disabled or scene stable)│
+               └──────────┬───────────────────┘
+                          │ trigger (scene change / user request)
+               ┌──────────▼───────────────────┐
+               │      COARSE_SWEEP             │
+               │  Step through full lens range  │
+               │  Record metric at each step    │
+               │  Find approximate peak         │
+               └──────────┬───────────────────┘
+                          │ peak found
+               ┌──────────▼───────────────────┐
+               │      FINE_SEARCH              │
+               │  Hill-climb around peak        │
+               │  Half-step refinement          │
+               └──────────┬───────────────────┘
+                          │ converged
+               ┌──────────▼───────────────────┐
+               │      TRACKING                 │
+               │  Monitor focus metric          │
+               │  Small adjustments if drift    │
+               │  Re-trigger if metric drops    │
+               └──────────────────────────────┘
+```
+
+Each state processes ONE frame and returns an AFResult. The host moves the lens between frames. The AF module remembers its state across calls.
+
+#### Output
+
+```python
+@dataclass
+class AFResult:
+    focus_metric: float            # current sharpness score
+    best_metric: float             # best seen during this search
+    recommended_position: int      # lens actuator step (0=infinity, max=macro)
+    direction: int                 # -1=near, 0=hold, +1=far
+    converged: bool
+    state: str                     # "idle" | "coarse" | "fine" | "tracking"
+```
+
+#### Config
+
+```yaml
+auto_focus:
+  is_enable: false                  # off by default (not all systems have AF)
+  metric: "tenengrad"               # "tenengrad" | "laplacian_var"
+  roi: [0.33, 0.33, 0.67, 0.67]    # normalised [x0, y0, x1, y1]
+  coarse_steps: 10                  # positions in coarse sweep
+  fine_steps: 5                     # half-steps in fine search
+  tracking_threshold: 0.05          # relative drop to re-trigger
+  lens_range: 100                   # total actuator steps
+```
+
+#### Pipeline position
+
+AF runs in the **Bayer domain after BNR** (same data as 3A stats collector). It uses the G channel for focus metric computation (highest spatial density). In the pipeline, AF executes alongside AWB — both consume 3A stats and produce metadata for the next frame.
+
+---
+
+## [2026-03-09] Phase 5 — Multi-frame Pipeline (Burst Capture + TNR)
+
+### 5.1–5.4: Burst capture denoising
+
+Architecture (from earlier dev_notes design, now refined):
+
+```
+N raw Bayer frames
+  │
+  ├── Frame 0 (reference): BLC → OECF
+  ├── Frame 1:             BLC → OECF → Register to Frame 0
+  ├── Frame 2:             BLC → OECF → Register to Frame 0
+  └── Frame N-1:           BLC → OECF → Register to Frame 0
+  │
+  ▼
+Motion detection (per-block SAD against temporal mean)
+  │
+  ▼
+Weighted temporal merge
+  (static: mean of all frames, √N SNR gain)
+  (moving: reference frame only)
+  (boundary: smooth blend)
+  │
+  ▼
+Single clean Bayer → rest of pipeline (BNR → AWB → WB → Demosaic → ...)
+```
+
+#### 5.1 — Raw stack loader
+
+```python
+class RawStackLoader:
+    def __init__(self, raw_paths: list, sensor_info: dict, parm_blc: dict, parm_oecf: dict):
+        """Load and pre-process N raw frames through BLC + OECF."""
+
+    def load(self) -> np.ndarray:
+        """Returns (N, H, W) uint16 Bayer stack, each frame BLC+OECF corrected."""
+```
+
+#### 5.2 — Phase correlation registration
+
+Translation-only registration via FFT cross-correlation on the G channel:
+
+```python
+def phase_correlate(ref_g: np.ndarray, target_g: np.ndarray) -> tuple:
+    """
+    Subpixel translation estimation via phase correlation.
+
+    Returns (dy, dx) shift to align target to reference.
+    Pure NumPy FFT — no OpenCV needed.
+    """
+    F_ref = np.fft.fft2(ref_g)
+    F_tar = np.fft.fft2(target_g)
+    cross_power = (F_ref * np.conj(F_tar)) / (np.abs(F_ref * np.conj(F_tar)) + eps)
+    cc = np.real(np.fft.ifft2(cross_power))
+    # Peak location = translation
+    peak = np.unravel_index(np.argmax(cc), cc.shape)
+    # Subpixel refinement via parabolic fit around peak
+    dy, dx = subpixel_refine(cc, peak)
+    return dy, dx
+
+def apply_shift(frame: np.ndarray, dy: float, dx: float) -> np.ndarray:
+    """Shift Bayer frame by (dy, dx) using bilinear interpolation.
+    Must shift in Bayer-aware manner: shift R/Gr/Gb/B sub-images separately
+    by (dy/2, dx/2) to preserve Bayer pattern alignment."""
+```
+
+Key: shifts must be applied to Bayer sub-channels (half-resolution) to preserve the CFA pattern. A 1-pixel shift in the full Bayer image is a 0.5-pixel shift in each sub-channel.
+
+Future upgrade: homography (8-DOF) for rotation/perspective, using feature matching on G.
+
+#### 5.3 — Motion detection + temporal merge
+
+```python
+def detect_motion(stack: np.ndarray, ref_idx: int, block_size: int, threshold: float):
+    """
+    Per-block motion mask between each frame and reference.
+
+    Returns (N, H//bs, W//bs) binary mask: 1=static, 0=moving.
+    Algorithm: block-wise SAD (sum of absolute differences).
+    """
+
+def temporal_merge(stack: np.ndarray, motion_masks: np.ndarray, method: str):
+    """
+    Weighted temporal average with motion masking.
+
+    Static blocks:  mean of all N frames (√N noise reduction)
+    Moving blocks:  reference frame only (no ghosting)
+    Boundary:       Gaussian-weighted blend of static/reference
+    """
+```
+
+#### 5.4 — Pipeline integration
+
+New config section:
+```yaml
+burst_capture:
+  is_enable: false
+  n_frames: 4
+  registration: "phase"              # "phase" (translation) | "homography" (future)
+  merge_method: "weighted_mean"      # "mean" | "weighted_mean" | "median"
+  motion_threshold: 15.0             # SAD threshold
+  block_size: 16
+```
+
+In `infinite_isp.py`: when `burst_capture.is_enable`, the pipeline loads N frames, runs BLC+OECF on each, registers, merges, then continues the single-frame pipeline from BNR onwards with the merged Bayer.
+
+#### 5.5 — Temporal Noise Reduction (TNR) for video
+
+Lightweight frame-to-frame IIR filter for continuous video capture (distinct from burst still capture):
+
+```python
+class TemporalNR:
+    """
+    IIR temporal filter: output_t = α × current + (1-α) × output_{t-1}
+    With motion masking: moving regions use current frame only (α=1).
+    """
+    def __init__(self, alpha=0.7, motion_threshold=10.0):
+        self.prev_frame = None
+        self.alpha = alpha
+
+    def apply(self, current_frame: np.ndarray) -> np.ndarray:
+        if self.prev_frame is None:
+            self.prev_frame = current_frame.copy()
+            return current_frame
+        # Motion mask
+        diff = np.abs(current_frame.astype(np.float32) - self.prev_frame.astype(np.float32))
+        motion = diff > self.motion_threshold  # per-pixel
+        # Blend
+        alpha_map = np.where(motion, 1.0, self.alpha)  # moving → use current
+        output = alpha_map * current_frame + (1 - alpha_map) * self.prev_frame
+        self.prev_frame = output.copy()
+        return np.clip(output, 0, 2**bit_depth - 1).astype(current_frame.dtype)
+```
+
+Config:
+```yaml
+temporal_nr:
+  is_enable: false
+  alpha: 0.7                         # IIR blend (0=frozen, 1=no filtering)
+  motion_threshold: 10.0             # per-pixel diff threshold
+```
+
+Pipeline position: **after BNR, before AWB** (Bayer domain). Runs only in video/continuous mode.
+
+---
+
+## [2026-03-09] Phase 6 — Lens Corrections (pipeline order TBD)
+
+### Overview
+
+Three lens correction modules needed for wearable cameras with small, wide-angle optics:
+
+| Module | What | Parameters | Source |
+|---|---|---|---|
+| **6.1 CAC** | Chromatic Aberration Correction — align R/B to G laterally | Per-channel radial shift coefficients | Manual config (future: calibration from chart edges) |
+| **6.2 LDC** | Lens Distortion Correction — barrel/pincushion | Radial polynomial k1, k2, k3 + tangential p1, p2 | Manual config (future: calibration from checkerboard) |
+| **6.3 Purple fringe** | Remove purple/magenta halos at blown highlight edges | Detection threshold, desaturation radius | Config: threshold, radius |
+
+### Pipeline position — open question
+
+**⚠ DISCUSS BEFORE IMPLEMENTING — pipeline order for lens corrections.**
+
+The correct placement of lens corrections depends on what they operate on:
+
+- **CAC** must be in Bayer domain (before demosaic) — it shifts R/B sub-images relative to G
+- **LDC** can be either Bayer or RGB domain:
+  - Bayer domain: geometrically correct raw → better demosaic at edges → but must resample each sub-channel independently
+  - RGB domain (after demosaic): simpler interpolation on full-res RGB → but demosaic has already seen distorted geometry
+- **Purple fringe** operates in RGB domain (after demosaic) — detects purple pixels near blown highlights
+
+Options for pipeline order:
+
+```
+Option A — All lens corrections in Bayer (before demosaic):
+  BLC → OECF → Digital Gain → CAC → LDC → LSC → BNR → Demosaic → ...
+
+Option B — Split: CAC in Bayer, LDC + PF in RGB:
+  BLC → OECF → Digital Gain → CAC → LSC → BNR → Demosaic → LDC → PF → CCM → ...
+
+Option C — All after demosaic (simpler, slightly lower quality):
+  ... → BNR → Demosaic → CAC → LDC → PF → CCM → ...
+```
+
+Recommendation to discuss: **Option B** is the industry standard. CAC must be Bayer (per-channel shift). LDC in RGB is simpler and high-quality. PF needs RGB.
+
+### Config sketch (manual coefficients, calibration-ready)
+
+```yaml
+chromatic_aberration_correction:
+  is_enable: false
+  # Radial shift model: dr = k1*r + k2*r^2 + k3*r^3 (per channel)
+  r_shift: [0.0, 0.0, 0.0]          # R channel radial shift [k1, k2, k3]
+  b_shift: [0.0, 0.0, 0.0]          # B channel radial shift
+  center: "auto"                      # "auto" (image center) or [cx, cy] pixels
+
+lens_distortion_correction:
+  is_enable: false
+  # Brown-Conrady model: radial k1,k2,k3 + tangential p1,p2
+  k1: 0.0
+  k2: 0.0
+  k3: 0.0
+  p1: 0.0
+  p2: 0.0
+  focal_length_px: 1000.0            # focal length in pixels (from calibration)
+  center: "auto"
+
+purple_fringe_removal:
+  is_enable: false
+  detection_threshold: 0.3           # hue-saturation threshold for "purple"
+  desaturation_radius: 3             # pixel radius for desaturation kernel
+```
+
+---
+
+## [2026-03-09] Phase 7 — DL Integration (plan only, detailed design later)
+
+### Overview
+
+Three tiers of DL integration, from simplest to most ambitious:
+
+| Tier | Model | Replaces | Dependencies | Training data |
+|---|---|---|---|---|
+| **DL-A** | Pre-trained RGB denoiser (NAFNet/Restormer) | Post-demosaic 2D NR only | ONNX Runtime | Published weights, no training |
+| **DL-B** | Bayer→RGB joint model | BNR + Demosaic + 2D NR Y | PyTorch/ONNX, GPU for training | Unprocessing from sRGB |
+| **DL-C** | Burst N-frame→RGB | Registration + Merge + BNR + Demosaic | PyTorch/ONNX, GPU for training | Synthetic burst via unprocessing |
+
+### Key infrastructure to build (in-repo)
+
+1. **Unprocessing data generator** (`training/unprocessing.py`): take clean sRGB → invert ISP (degamma → inverse CCM → mosaic → add noise) using actual pipeline parameters from configs.yml. This generates training pairs for DL-B and DL-C.
+
+2. **ONNX inference wrapper** (`modules/dl_denoise/onnx_inference.py`): load and run any ONNX model within the pipeline. The user provides the model file.
+
+3. **Pipeline mode switch**: `dl_denoise.mode` selects classical vs. DL path. `fallback_classical: true` ensures the pipeline still works if the model is missing.
+
+### Config placeholder
+
+```yaml
+dl_denoise:
+  is_enable: false
+  mode: "bayer_joint"                 # "bayer_joint" | "rgb_post" | "burst"
+  model_path: "models/joint_bayer.onnx"
+  fallback_classical: true
+  iso_conditioning: true              # pass ISO as noise level hint to model
+```
+
+### References
+
+- CycleISP (Zamir et al., 2020) — realistic noise synthesis for Bayer domain training
+- DeepJoint (Gharbi et al., 2016) — joint demosaic+denoise CNN
+- Unprocessing (Brooks et al., 2019) — ISP inversion for training data
+- NAFNet (Chen et al., 2022) — efficient baseline RGB denoiser
+- KPN (Mildenhall et al., 2018) — kernel prediction for burst denoising
+- DBSR (Bhat et al., 2021) — deep burst super-resolution in raw
+
+> **⚑ REVISIT LATER — DL integration** — Design details (architecture, loss functions, training recipe) to be specified when implementation begins. Current plan establishes the framework and interface.
+
+---
+
+## [2026-03-09] Phase 8 — HDR Pipeline (plan only, detailed design later)
+
+### Overview
+
+Three components needed for correct HDR output:
+
+| Item | What | Depends on |
+|---|---|---|
+| **8.1 HDR merge** | Multi-exposure bracketing → single HDR image | Burst capture infrastructure (Phase 5) |
+| **8.2 Absolute luminance mapping** | Exposure metadata → scene luminance in nits | AE metadata (Phase 4) |
+| **8.3 HDR tone mapping** | Map scene dynamic range to display peak luminance | Output profiles (Phase 3.3), EOTF (Phase 3.2) |
+
+The output profile system (Phase 3.3) already supports HDR10 (PQ) and HLG output. What's missing is the tone mapping step that maps the captured scene's actual dynamic range into the display's representable range. Without this, PQ encoding is syntactically valid but tonally wrong.
+
+> **⚑ REVISIT LATER — HDR pipeline** — Requires absolute luminance estimation from capture metadata (ISO, shutter, aperture, ND factor). Design details deferred until Phases 4–5 provide the runtime metadata infrastructure.
+
+---
+
+## [2026-03-09] Factory Calibration (deferred)
+
+Factory-level calibration (OECF, LSC, CCM, BLC, DPC) requires specific equipment and capture procedures. Deferred until core pipeline and 3A are mature. The calibration module design from [2026-03-06] remains valid and can be implemented when needed.
+
+Current pipeline uses manual config values from `configs.yml`. Phase 6 lens corrections also use manual coefficients with calibration-ready config structure.
+
+---
+
+## [2026-03-09] Summary: complete pipeline with all planned phases
+
+### Target pipeline order (all phases complete)
+
+```
+[Burst path: N frames → BLC → OECF → Register → Merge] OR [Single frame → BLC → OECF]
+→ BLC linearise → Digital Gain → CAC (Bayer) → LSC → BNR → TNR (video only)
+→ [3A Stats] → AWB/AF → WB → Demosaic → LDC (RGB) → Purple Fringe
+→ CCM → LDCI → 2D NR → Gamma → AE → CSC → Color Saturation → Sharpen
+→ RGB Conv → Scale → YUV Format → Dither → Output Encode
+```
+
+### Dependency graph
+
+```
+Phase 4 (3A)  ─────────────┐
+                            ├─→  Phase 7 (DL — uses AE/ISO metadata)
+Phase 5 (Multi-frame) ─────┤
+                            ├─→  Phase 8 (HDR — uses burst + luminance)
+Phase 6 (Lens Corrections) ─┘    (independent, pipeline order discussion needed)
+```

@@ -1,7 +1,7 @@
 # EdgeISP — Implementation Roadmap
 
-Status: **Phase 2 mostly complete; Phase 3.2 (Gamma EOTF) done; Phase 3 in progress**
-Last updated: 2026-03-08
+Status: **Phase 1–3 output system complete (180 tests); Phase 4–8 planned; factory calibration deferred**
+Last updated: 2026-03-09
 
 ---
 
@@ -48,14 +48,20 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
   - Backward compat: default mode is "fixed" (original behaviour unchanged)
   - Ref: dev_notes.md "DPC: Auto-threshold"
 
-- [ ] **2.2 Demosaic: LMMSE mode**
-  - Add `demosaic_method: "mhc" | "lmmse"` to config
-  - Implement LMMSE in new file `modules/demosaic/lmmse.py`
+- [x] **2.2 Demosaic: LMMSE mode**
+  - Added `demosaic_method: "mhc" | "lmmse"` to config; default "mhc" (backward compat)
+  - `lmmse.py`: directional G interpolation (activity-weighted H/V fusion, eps-regularised)
+    + bilinear colour-difference interpolation (H → V → diagonal priority)
+  - Pure NumPy — no scipy; O(H×W) apart from small constant per kernel offset
+  - Backward compat: default "mhc" calls Malvar-He-Cutler unchanged
   - Ref: dev_notes.md "Demosaicing — MHC recap + state-of-the-art landscape"
 
-- [ ] **2.3 LDCI: Guided filter LTM mode**
-  - Add `mode: "clahe" | "guided_filter"` to config
-  - Implement guided filter base/detail decomposition on Y channel
+- [x] **2.3 LDCI: Guided filter LTM mode**
+  - Added `mode: "clahe" | "guided_filter"` to config; default "clahe" (backward compat)
+  - `guided_filter_ltm.py`: O(N) integral-image box filter → self-guided filter →
+    base/detail decomposition → power-law base compression → detail amplification
+  - Config: `guided_radius`, `guided_eps`, `detail_gain`, `base_compression`
+  - Handles both float32 [0,1] and uint8 [0,255] YUV input; Cb/Cr untouched
   - Ref: dev_notes.md "LDCI — upgrade to Guided Filter LTM"
 
 - [x] **2.4 Sharpen: Edge-adaptive gain mode**
@@ -82,9 +88,14 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
   - Backward compat: default mode is "nlm" (original NLM algorithm, unchanged)
   - Ref: dev_notes.md "2D NR — dual-role design"
 
-- [ ] **2.7 BLC: OB pixel per-capture black level**
-  - Add `ob_pixel_rows` config, auto-detect BL from optical black region
-  - Ref: dev_notes.md "BLC OB pixels"
+- [x] **2.7 BLC: OB pixel per-capture black level**
+  - Added `use_ob_pixels`, `ob_rows`, `ob_cols`, `ob_correction_mode`, `ob_smoothing` to config
+  - `_estimate_offsets_from_ob()`: estimates per-channel offsets from OB region via
+    median/mean; scalar mode overrides config offsets; per_column stores column-wise offset
+  - `apply_blc_per_column()`: subtracts per-column FPN correction (1D broadcast)
+  - Original parm dict not mutated (`.copy()` in `__init__`); fallback to config if no OB
+  - Backward compat: `use_ob_pixels: false` (default) uses fixed config values unchanged
+  - Ref: dev_notes.md "BLC: Leverage optical black (OB) pixels for per-capture black level"
 
 - [x] **2.8 YUV format: 4:2:0 output**
   - Added `conv_type: "420"` to YUV config (`"444" | "422" | "420"`)
@@ -94,13 +105,18 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
 
 ---
 
-## Phase 3 — New Capabilities [NOT STARTED]
+## Phase 3 — New Capabilities [IN PROGRESS]
 
 ### Output system
 
-- [ ] **3.1 CCM: XYZ intermediate architecture**
-  - Split CCM into camera→XYZ (calibrated) + XYZ→target (fixed matrix)
-  - Add target matrices for sRGB, Display P3, BT.2020
+- [x] **3.1 CCM: XYZ intermediate architecture**
+  - `xyz_matrices.py`: M_XYZ_TO_SRGB, M_XYZ_TO_P3, M_XYZ_TO_BT2020, M_SRGB_TO_XYZ
+  - `get_xyz_to_target(target)` + `derive_camera_to_xyz(direct_ccm)` helpers
+  - `color_correction_matrix.py`: `mode: "direct" | "xyz"` dispatch
+    - "direct" = original single-step camera→sRGB (backward compat default)
+    - "xyz" = camera→XYZ→target with optional explicit `camera_to_xyz_*` rows
+    - Falls back to derived matrix (direct_ccm @ M_SRGB_TO_XYZ) when rows absent
+  - Config: `mode`, `target`, optional `camera_to_xyz_{red,green,blue}` in CCM section
   - Ref: dev_notes.md "CCM target primaries + Gamma EOTF"
 
 - [x] **3.2 Gamma: multi-EOTF support**
@@ -112,67 +128,220 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
   - Backward compat: default `eotf: "lut"` uses original LUT-based path unchanged
   - Ref: dev_notes.md "CCM target primaries + Gamma EOTF"
 
-- [ ] **3.3 Output profile system**
-  - Add `output_profile: "srgb" | "display_p3" | "hdr10" | "hlg" | "linear"` to config
-  - Profile bundles CCM target + EOTF + bit depth automatically
-  - Ref: dev_notes.md "CCM target primaries + Gamma EOTF"
+- [x] **3.3 Output profile system**
+  - `util/output_profile.py`: 6 named profiles (srgb, rec709, display_p3, hdr10, hlg, linear)
+  - Each profile bundles (ccm_mode, ccm_target, gamma_eotf) — always consistent
+  - `apply_profile_to_params()` mutates parm_ccm + parm_gmc before module execution
+  - Wired into `InfiniteISP.__init__()` after config loading
+  - `output.profile: "custom"` (default) is a no-op — backward compat preserved
+  - Config: new `output:` section with `profile` key at end of configs.yml
+  - Ref: dev_notes.md "CCM and EOTF are coupled — use output profiles"
 
-- [ ] **3.4 Blue noise dithering**
-  - Generate 128×128 void-and-cluster mask (static asset)
-  - Add dither step before uint8 quantisation
-  - Add `dither: "none" | "tpdf" | "blue_noise"` to output config
+- [x] **3.4 Blue noise dithering**
+  - `util/dither.py`: void-and-cluster mask generation + runtime dithering
+    - `generate_void_and_cluster(size)`: Ulichney 1993 algorithm, pure NumPy
+    - `apply_dither(img, mode)`: "none" | "tpdf" | "blue_noise"
+    - `encode_8bit(img, dither_mode)`: accepts uint8/uint16/float input
+    - Blue noise mask cached on first use (64×64, generates in ~2s)
+  - Applied in `save_pipeline_output()` before uint8 save
+  - Config: `output.dither: "none"` (default, backward compat)
   - Ref: dev_notes.md "Blue noise dithering for 8-bit output"
 
-- [ ] **3.5 JPEG output encoding**
-  - Add `format: "png" | "jpeg" | "exr"` with `jpeg_quality` parameter
-  - Complete the raw→JPEG pipeline
+- [x] **3.5 JPEG output encoding**
+  - `save_pipeline_output()` now reads `output.format` ("png" | "jpeg")
+  - JPEG path: `plt.imsave(..., format="jpeg", pil_kwargs={"quality": N})`
+  - Config: `output.format: "png"` (default), `output.jpeg_quality: 95`
+  - Backward compat: default PNG path unchanged
 
-### Calibration module
+### Factory Calibration [DEFERRED]
 
-- [ ] **3.6 Calibration module framework**
-  - Create `calibration/` directory structure
-  - Implement `calibration_runner.py` + shared utilities
-  - Ref: dev_notes.md "Calibration Module — Design Proposal"
-
-- [ ] **3.7 BLC calibrator** — dark frame capture, per-channel offset estimation
-- [ ] **3.8 DPC calibrator** — dead pixel map from dark/bright frames
-- [ ] **3.9 OECF calibrator** — stepped exposure → LUT generation
-- [ ] **3.10 LSC calibrator** — flat-field capture → per-channel gain map
-- [ ] **3.11 WB + CCM calibrator** — ColorChecker capture → WB gains + 3×3 CCM to XYZ
-- [ ] **3.12 LSC: dual-mode implementation** — calibrated gain map + lensfun database lookup
-  - Ref: dev_notes.md "LSC design"
+Factory-level calibration (OECF, LSC, CCM, BLC, DPC) deferred until core pipeline and 3A are mature.
+Design spec preserved in dev_notes.md "Calibration Module — Design Proposal" [2026-03-06].
 
 ---
 
-## Phase 4 — Multi-frame & Low-light [NOT STARTED]
+## Phase 4 — 3A Algorithm Upgrades [NOT STARTED]
 
-- [ ] **4.1 Multi-frame capture pipeline** — N Bayer frames → register → average
-  - Homography registration on G channel
-  - Weighted mean merge with motion masking
-  - Ref: dev_notes.md "BNR: Multi-Frame Denoising design"
+### 3A Stats Infrastructure
 
-- [ ] **4.2 Low-light capture mode** — config profile bundling multi-frame + appropriate NR + demosaic
-  - Ref: dev_notes.md "Low-light capture mode — pipeline architecture decision"
+- [ ] **4.1 3A stats collector** — shared zone-based stats for AE+AWB+AF
+  - `modules/3a_stats/stats_collector.py`: zone luminance histograms, channel means/gradients, focus metric
+  - NxN grid (default 16×16) computed once per frame in Bayer domain after BNR
+  - Output: `Stats3A` dataclass consumed by all three algorithms
+  - Ref: dev_notes.md "Phase 4 — 3A Algorithm Upgrades"
 
-- [ ] **4.3 Adaptive N frames** — SNR-based frame count selection
-  - Ref: dev_notes.md "BNR: Multi-Frame Denoising design"
+### Auto-Exposure (industry-grade)
+
+- [ ] **4.2 AE: zone metering + histogram analysis**
+  - `ae_stats.py`: zone luminance extraction, histogram computation from Stats3A
+  - `ae_metering.py`: center-weighted, spot, matrix metering modes with configurable weights
+  - Highlight protection (keep 97th percentile below saturation)
+  - Ref: dev_notes.md "4.2 — AE: Industry-grade Auto-Exposure"
+
+- [ ] **4.3 AE: exposure triangle solver + PID convergence**
+  - `ae_controller.py`: PID convergence with damping, hysteresis band
+  - Exposure triangle: shutter_us → analog_gain_db → digital_gain (configurable priority)
+  - Flicker avoidance (50Hz/60Hz quantised shutter)
+  - Output: `AEResult` dataclass with full exposure metadata for host
+  - EV compensation support
+  - Ref: dev_notes.md "4.2 — AE: Industry-grade Auto-Exposure"
+
+### Auto-White-Balance
+
+- [ ] **4.4 AWB: Gray Edge algorithm**
+  - `gray_edge.py`: gradient-based illuminant estimation (Sobel/Laplacian, Minkowski p-norm)
+  - More robust than Gray World for non-neutral scenes (sunset, foliage, tungsten)
+  - Configurable: `edge_order` (1=Sobel, 2=Laplacian), `minkowski_norm` (1=L1, 6≈max)
+  - Ref: dev_notes.md "4.3 — AWB: Gray Edge + temporal damping"
+
+- [ ] **4.5 AWB: temporal damping**
+  - IIR filter on gains across frames: `gain_t = α × new + (1-α) × prev`
+  - Prevents WB flicker in video/burst. α=0 for single-shot (backward compat).
+  - Ref: dev_notes.md "4.3 — AWB: Gray Edge + temporal damping"
+
+### Auto-Focus
+
+- [ ] **4.6 AF: focus metrics** — Tenengrad (Sobel gradient energy) + Laplacian variance
+  - `af_metric.py`: compute sharpness score in configurable ROI
+  - Operates on G channel in Bayer domain (highest spatial density)
+  - Ref: dev_notes.md "4.4 — AF: Contrast-Detect Auto-Focus"
+
+- [ ] **4.7 AF: search strategy + state machine**
+  - `af_search.py`: IDLE → COARSE_SWEEP → FINE_SEARCH → TRACKING state machine
+  - Coarse sweep across full lens range, fine hill-climb around peak
+  - Output: `AFResult` with recommended lens position, direction, converged flag
+  - Stateful across frames (remembers search progress)
+  - Ref: dev_notes.md "4.4 — AF: Contrast-Detect Auto-Focus"
+
+- [ ] **4.8 AF: pipeline integration**
+  - `auto_focus.py`: module class with `execute()` returning `AFResult`
+  - Position: Bayer domain after BNR, alongside AWB
+  - Config: `auto_focus.is_enable: false` (default off — not all systems have AF)
+  - Ref: dev_notes.md "4.4 — AF: Contrast-Detect Auto-Focus"
 
 ---
 
-## Phase 5 — DL Integration [NOT STARTED — FUTURE]
+## Phase 5 — Multi-frame Pipeline [NOT STARTED]
 
-- [ ] **5.1 Joint Bayer DL denoise + demosaic model**
-  - Noisy Bayer → clean RGB, replaces BNR + Demosaic + 2D NR Y-channel
-  - Training data via unprocessing technique
-  - Ref: dev_notes.md "ML/DL Denoising — Bayer domain vs. post-demosaic RGB domain"
+### Burst capture denoising
 
-- [ ] **5.2 Burst DL for low-light**
-  - N raw Bayer frames → clean RGB, no explicit registration
-  - Ref: dev_notes.md "Burst DL (Phase 4)"
+- [ ] **5.1 Raw stack loader** — load N raw frames, apply BLC+OECF to each
+  - Reuse existing BLC/OECF module classes per frame
+  - Output: (N, H, W) uint16 Bayer stack
+  - Ref: dev_notes.md "Phase 5 — Multi-frame Pipeline"
 
-- [ ] **5.3 HDR absolute luminance mapping**
-  - Exposure metadata → nit mapping before PQ encoding
-  - Ref: dev_notes.md "HDR absolute luminance add-on"
+- [ ] **5.2 Phase correlation registration** — align frames to reference (frame 0)
+  - FFT cross-correlation on G channel, subpixel translation
+  - Bayer-aware shift (per sub-channel interpolation to preserve CFA pattern)
+  - Pure NumPy — no OpenCV dependency
+  - Future: homography upgrade for rotation/perspective
+  - Ref: dev_notes.md "5.2 — Phase correlation registration"
+
+- [ ] **5.3 Motion detection + temporal merge**
+  - Per-block SAD motion mask (16×16 or 32×32 blocks)
+  - Weighted merge: static=mean (√N SNR), moving=reference only, boundary=blend
+  - Ref: dev_notes.md "5.3 — Motion detection + temporal merge"
+
+- [ ] **5.4 Pipeline integration** — wire burst path into infinite_isp.py
+  - `burst_capture.is_enable` config: when true, loads N frames → register → merge → continue
+  - Merged Bayer enters pipeline at BNR stage
+  - AE interaction: burst mode prefers lower per-frame gain, more frames
+  - Ref: dev_notes.md "5.4 — Pipeline integration"
+
+### Temporal Noise Reduction (video)
+
+- [ ] **5.5 TNR: IIR temporal filter**
+  - `temporal_nr.py`: per-pixel IIR blend with motion masking
+  - Static pixels: α-blend with previous output (temporal smoothing)
+  - Moving pixels: use current frame (no ghosting)
+  - Position: Bayer domain after BNR, before AWB (video/continuous mode only)
+  - Config: `temporal_nr.is_enable: false`, `alpha`, `motion_threshold`
+  - Ref: dev_notes.md "5.5 — Temporal Noise Reduction"
+
+---
+
+## Phase 6 — Lens Corrections [NOT STARTED — pipeline order TBD]
+
+**⚠ Pipeline order discussion needed before implementation** — see dev_notes.md "Phase 6"
+
+- [ ] **6.1 Chromatic Aberration Correction (CAC)**
+  - Per-channel radial shift to align R/B to G
+  - Bayer domain (before demosaic) — shifts R/B sub-images
+  - Config: `r_shift: [k1, k2, k3]`, `b_shift: [k1, k2, k3]`
+  - Manual coefficients now; calibration-ready for future
+
+- [ ] **6.2 Lens Distortion Correction (LDC)**
+  - Brown-Conrady radial+tangential model
+  - RGB domain (after demosaic) — simpler interpolation
+  - Config: `k1, k2, k3, p1, p2, focal_length_px`
+  - Manual coefficients now; future checkerboard calibration
+
+- [ ] **6.3 Purple Fringe Removal**
+  - Detect high-saturation purple pixels near blown highlights
+  - Selective desaturation in HSV/Lab space
+  - RGB domain (after demosaic)
+  - Config: `detection_threshold`, `desaturation_radius`
+
+---
+
+## Phase 7 — DL Integration [NOT STARTED — FUTURE]
+
+Plan only. Detailed architecture when implementation begins.
+
+- [ ] **7.1 Unprocessing data generator** — ISP inversion for training data synthesis
+  - `training/unprocessing.py`: clean sRGB → degamma → inverse CCM → mosaic → add noise
+  - Uses actual pipeline parameters from configs.yml
+  - Ref: dev_notes.md "Phase 7 — DL Integration"
+
+- [ ] **7.2 ONNX inference wrapper** — generic DL model runner for pipeline
+  - `modules/dl_denoise/onnx_inference.py`: load ONNX model, pre/post process
+  - CPU-friendly (ONNX Runtime) for embedded target
+
+- [ ] **7.3 DL-A: pre-trained RGB denoiser** — NAFNet/Restormer replacing post-demosaic 2D NR
+  - Published weights, no training required
+  - `dl_denoise.mode: "rgb_post"`
+
+- [ ] **7.4 DL-B: joint Bayer denoise+demosaic** — replaces BNR + Demosaic + 2D NR Y
+  - Training via unprocessing (7.1)
+  - `dl_denoise.mode: "bayer_joint"`
+  - Ref: dev_notes.md "ML/DL Denoising"
+
+- [ ] **7.5 DL-C: burst DL pipeline** — N frames → clean RGB, no explicit registration
+  - End-to-end learned alignment + merge + denoise + demosaic
+  - `dl_denoise.mode: "burst"`
+  - Ref: dev_notes.md "Burst DL"
+
+---
+
+## Phase 8 — HDR Pipeline [NOT STARTED — FUTURE]
+
+Plan only. Requires Phases 4–5 metadata infrastructure.
+
+- [ ] **8.1 HDR merge** — multi-exposure bracketing → single HDR frame
+  - Uses burst capture infrastructure (Phase 5)
+  - Debevec/Mertens exposure fusion
+
+- [ ] **8.2 Absolute luminance mapping** — exposure metadata → scene nits
+  - Uses AE metadata (Phase 4): ISO, shutter, aperture
+  - `absolute_luminance_mapping` module before tone mapping
+
+- [ ] **8.3 HDR tone mapping** — scene dynamic range → display peak luminance
+  - Needed for correct PQ/HLG output (Phase 3.3 profiles)
+  - Global + local tone mapping operators
+
+---
+
+## Factory Calibration [DEFERRED]
+
+- [ ] **F.1 Calibration framework** — `calibration/` directory, runner, shared utilities
+- [ ] **F.2 BLC calibrator** — dark frames → per-channel offsets + saturation levels
+- [ ] **F.3 DPC calibrator** — dark/bright frames → static defect map
+- [ ] **F.4 OECF calibrator** — exposure series → linearisation LUT
+- [ ] **F.5 LSC calibrator** — flat-field → per-channel gain map
+- [ ] **F.6 WB + CCM calibrator** — ColorChecker → WB gains + 3×3 CCM
+- [ ] **F.7 Lens calibration** — checkerboard → distortion coefficients + CA model
+
+Design spec in dev_notes.md "Calibration Module — Design Proposal" [2026-03-06].
 
 ---
 
@@ -182,3 +351,4 @@ Each item adds a configurable high-quality mode alongside the existing baseline 
 - **Config-driven**: every new feature is a config flag, never a hardcoded change
 - **dev_notes.md is the spec**: every item above references a section in `docs/dev_notes.md` with full technical rationale, algorithm detail, and config YAML design
 - **Testing**: after each change, run `python isp_pipeline.py` and verify output in `out_frames/`
+- **Test suites**: test_phase1.py (27), test_phase2.py (24), test_phase3.py (46), test_phase4.py (38), test_phase5.py (45) — 180 total tests, all passing

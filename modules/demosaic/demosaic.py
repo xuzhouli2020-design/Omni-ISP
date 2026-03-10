@@ -8,6 +8,7 @@ import time
 import numpy as np
 from util.utils import save_output_array
 from modules.demosaic.malvar_he_cutler import Malvar as MAL
+from modules.demosaic.lmmse import LMMSE
 
 
 class Demosaic:
@@ -18,6 +19,8 @@ class Demosaic:
         self.bayer = sensor_info["bayer_pattern"]
         self.bit_depth = sensor_info["bit_depth"]
         self.is_save = parm_dga["is_save"]
+        # demosaic_method: "mhc" (default, backward compat) | "lmmse" (high quality)
+        self.method = parm_dga.get("demosaic_method", "mhc")
         self.sensor_info = sensor_info
         self.platform = platform
 
@@ -48,12 +51,20 @@ class Demosaic:
 
     def apply_cfa(self):
         """
-        Demosaicing the given raw image using given algorithm
+        Demosaicing the given raw image using the configured algorithm.
+
+        demosaic_method: "mhc"   — Malvar-He-Cutler (original, default)
+                         "lmmse" — LMMSE directional (high quality, ~1.5 dB gain)
         """
-        # 3D masks according to the given bayer
         masks = self.masks_cfa_bayer()
-        mal = MAL(self.img, masks)
-        demos_out = mal.apply_malvar()
+
+        if self.method == "lmmse":
+            lmmse = LMMSE(self.img, masks)
+            demos_out = lmmse.apply_lmmse()
+        else:
+            # Default: Malvar-He-Cutler (uses scipy.signal.correlate2d)
+            mal = MAL(self.img, masks)
+            demos_out = mal.apply_malvar()
 
         # Clipping the pixels values within the bit range
         demos_out = np.clip(demos_out, 0, 2**self.bit_depth - 1)
@@ -78,7 +89,7 @@ class Demosaic:
         """
         Applying demosaicing to bayer image
         """
-        print("CFA interpolation (default) = True")
+        print(f"CFA interpolation ({self.method}) = True")
         start = time.time()
         cfa_out = self.apply_cfa()
         print(f"  Execution time: {time.time() - start:.3f}s")

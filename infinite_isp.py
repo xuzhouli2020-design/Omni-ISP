@@ -12,6 +12,7 @@ import yaml
 import rawpy
 
 import util.utils as util
+from util.output_profile import apply_profile_to_params
 
 from modules.crop.crop import Crop
 from modules.dead_pixel_correction.dead_pixel_correction import (
@@ -28,8 +29,10 @@ from modules.lens_shading_correction.lens_shading_correction import (
 from modules.bayer_noise_reduction.bayer_noise_reduction import (
     BayerNoiseReduction as BNR,
 )
+from modules.stats_3a.stats_collector import Stats3ACollector
 from modules.auto_white_balance.auto_white_balance import AutoWhiteBalance as AWB
 from modules.white_balance.white_balance import WhiteBalance as WB
+from modules.auto_focus.auto_focus import AutoFocus
 from modules.demosaic.demosaic import Demosaic
 from modules.color_correction_matrix.color_correction_matrix import (
     ColorCorrectionMatrix as CCM,
@@ -100,7 +103,23 @@ class InfiniteISP:
             self.parm_yuv = c_yaml["yuv_conversion_format"]
             self.c_yaml = c_yaml
 
+            # Phase 3.3: apply output profile overrides (CCM target + Gamma EOTF)
+            # If output: section is absent or profile="custom", this is a no-op.
+            output_cfg = c_yaml.get("output", {})
+            apply_profile_to_params(output_cfg, self.parm_ccm, self.parm_gmc)
+
             self.platform["rgb_output"] = self.parm_rgb["is_enable"]
+
+            # Phase 4 — 3A config sections (with safe defaults for missing keys)
+            self.parm_3a  = c_yaml.get("3a_stats",    {"is_enable": True})
+            self.parm_af  = c_yaml.get("auto_focus",  {"is_enable": False})
+
+        # Phase 4 — persistent 3A state across execute() calls
+        # These are initialised here so they survive between run_pipeline() calls
+        # when render_3a=True runs multiple iterations.
+        self._af_machine   = None   # AFSearchMachine — persisted between frames
+        self._awb_prev_gains  = None   # np.array([r, b]) from last AWB pass
+        self._ae_prev_params  = None   # ExposureParams from last AE pass
 
         # add rgb_output_conversion module
 
@@ -194,9 +213,38 @@ class InfiniteISP:
         bnr_raw = bnr.execute()
 
         # =====================================================================
+        # 3A Statistics — shared Bayer-domain stats for AE, AWB, AF
+        # (Phase 4.1) Runs after BNR (clean signal), before AWB.
+        stats_col = Stats3ACollector(bnr_raw, self.sensor_info, self.parm_3a)
+        self.stats_3a = stats_col.execute()
+
+        # =====================================================================
+        # Auto Focus — passive; does not modify image; updates lens metadata
+        # (Phase 4.8) Runs in Bayer domain using Tenengrad from stats_3a.
+        af_mod = AutoFocus(
+            bnr_raw,
+            self.sensor_info,
+            self.parm_af,
+            stats    = self.stats_3a,
+            af_state = self._af_machine,
+        )
+        af_mod.execute()
+        # Persist state machine for next frame
+        self._af_machine   = af_mod.af_machine
+        self.af_result     = af_mod.result
+
+        # =====================================================================
         # Auto White Balance
-        awb = AWB(bnr_raw, self.sensor_info, self.parm_awb)
+        awb = AWB(
+            bnr_raw,
+            self.sensor_info,
+            self.parm_awb,
+            stats      = self.stats_3a,
+            prev_gains = self._awb_prev_gains,
+        )
         self.awb_gains = awb.execute()
+        if self.awb_gains is not None:
+            self._awb_prev_gains = self.awb_gains.copy()
 
         # =====================================================================
         # White balancing
@@ -269,9 +317,20 @@ class InfiniteISP:
         gamma_raw = gmc.execute()
 
         # =====================================================================
-        # Auto-Exposure
-        aef = AE(gamma_raw, self.sensor_info, self.parm_ae)
+        # Auto-Exposure — runs post-gamma for luminance evaluation (legacy path)
+        # or uses Stats3A zone_means in zone_metering mode (Phase 4.2/4.3).
+        aef = AE(
+            gamma_raw,
+            self.sensor_info,
+            self.parm_ae,
+            stats       = self.stats_3a,
+            prev_params = self._ae_prev_params,
+        )
         self.ae_feedback = aef.execute()
+        # Persist ExposureParams state for next frame (zone_metering mode)
+        from modules.auto_exposure.ae_controller import ExposureParams
+        if isinstance(self.ae_feedback, ExposureParams):
+            self._ae_prev_params = self.ae_feedback
 
         # =====================================================================
         # Color space conversion
@@ -400,9 +459,25 @@ class InfiniteISP:
                 self.awb_gains[1]
             )
         if ae_on is True and self.parm_dga["is_auto"] and self.parm_ae["is_enable"]:
-            self.parm_dga["ae_feedback"] = self.c_yaml["digital_gain"][
-                "ae_feedback"
-            ] = self.ae_feedback
+            # zone_metering mode: ExposureParams carries digital_gain directly
+            from modules.auto_exposure.ae_controller import ExposureParams
+            if isinstance(self.ae_feedback, ExposureParams):
+                # Use the digital_gain component as the feedback integer equivalent
+                # for the legacy DGA gain array logic.  Map to -1/0/+1.
+                ep = self.ae_feedback
+                if ep.converged:
+                    fb = 0
+                elif ep.error_ev > 0:
+                    fb = 1    # too dark → increase gain
+                else:
+                    fb = -1   # too bright → decrease gain
+                self.parm_dga["ae_feedback"] = self.c_yaml["digital_gain"][
+                    "ae_feedback"
+                ] = fb
+            else:
+                self.parm_dga["ae_feedback"] = self.c_yaml["digital_gain"][
+                    "ae_feedback"
+                ] = self.ae_feedback
             self.parm_dga["current_gain"] = self.c_yaml["digital_gain"][
                 "current_gain"
             ] = self.dga_current_gain

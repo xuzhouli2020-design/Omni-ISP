@@ -1,122 +1,165 @@
 """
 File: auto_exposure.py
-Description: 3A-AE Runs the Auto exposure algorithm in a loop
-Code / Paper  Reference: https://www.atlantis-press.com/article/25875811.pdf
-                         http://tomlr.free.fr/Math%E9matiques/Math%20Complete/Probability%20and%20statistics/CRC%20-%20standard%20probability%20and%20Statistics%20tables%20and%20formulae%20-%20DANIEL%20ZWILLINGER.pdf
-Author: 10xEngineers Pvt Ltd
+Description: 3A-AE Runs the Auto exposure algorithm in a loop.
+             Extended with industry-grade zone metering (Phase 4.2) and
+             an exposure-triangle P-gain convergence controller (Phase 4.3).
+
+Original algorithm (legacy mode):
+  Skewness-based histogram AE — returns ±1/0 digital-gain feedback.
+
+Industry-grade mode ("zone_metering"):
+  1. AEMetering — computes metered scene brightness from Stats3A zone_means.
+  2. AEController — allocates EV correction across (shutter_us, analog_gain_db,
+     digital_gain) using a proportional controller, returns ExposureParams.
+
+Mode selection:
+  parm_ae["mode"]:
+    "legacy"        — original skewness histogram feedback (default, backward compat)
+    "zone_metering" — new zone metering + exposure triangle solver
+
+Code / Paper Reference:
+  - Original: https://www.atlantis-press.com/article/25875811.pdf
+  - AE zone metering: standard camera AE textbooks
+Author: 10xEngineers Pvt Ltd (original); EdgeISP Phase 4.2/4.3 extensions
 ------------------------------------------------------------
 """
 import time
 import numpy as np
 
+from modules.auto_exposure.ae_metering   import AEMetering
+from modules.auto_exposure.ae_controller import AEController, ExposureParams
+
 
 class AutoExposure:
     """
-    Auto Exposure Module
+    Auto Exposure Module.
+
+    Parameters
+    ----------
+    img         : np.ndarray            Post-gamma RGB image (for legacy mode).
+    sensor_info : dict                  Sensor metadata.
+    parm_ae     : dict                  AE config section from configs.yml.
+    stats       : Stats3A | None        Pre-computed 3A stats (zone_metering mode).
+    prev_params : ExposureParams | None Previous frame's exposure params (warm-start).
     """
 
-    def __init__(self, img, sensor_info, parm_ae):
-        self.img = img
-        self.enable = parm_ae["is_enable"]
-        self.is_debug = parm_ae["is_debug"]
-        self.center_illuminance = parm_ae["center_illuminance"]
-        self.histogram_skewness_range = parm_ae["histogram_skewness"]
+    def __init__(self, img, sensor_info, parm_ae,
+                 stats=None, prev_params=None):
+        self.img        = img
+        self.enable     = parm_ae["is_enable"]
+        self.is_debug   = parm_ae.get("is_debug", False)
         self.sensor_info = sensor_info
-        self.param_ae = parm_ae
-        self.bit_depth = sensor_info["bit_depth"]
+        self.parm_ae    = parm_ae
+        self.bit_depth  = sensor_info["bit_depth"]
+        self.mode       = str(parm_ae.get("mode", "legacy"))
 
-        # Pipeline modules included in AE Feedback Loop
-        # (White Balance) wb module is renamed to wbc (white balance correction)
-        # gc (Gamma Correction) module is renamed to gcm (Gamma Correction Module)
+        # Legacy parameters (always parsed for backward compat)
+        self.center_illuminance       = parm_ae.get("center_illuminance", 128)
+        self.histogram_skewness_range = parm_ae.get("histogram_skewness", 0.5)
 
-    def get_exposure_feedback(self):
+        # Phase 4.2/4.3 state
+        self.stats       = stats
+        self.prev_params = prev_params   # ExposureParams or None
+
+    # ------------------------------------------------------------------
+    # Public execute
+    # ------------------------------------------------------------------
+
+    def execute(self):
         """
-        Get Correct Exposure by Adjusting Digital Gain
+        Execute Auto Exposure.
+
+        Returns
+        -------
+        In legacy mode : int  (+1 too dark / 0 OK / -1 too bright)
+        In zone_metering mode : ExposureParams dataclass with full metadata.
+        Returns None when disabled.
         """
-        # Convert Image into 8-bit for AE Calculation
-        self.img = self.img >> (self.bit_depth - 8)
-        self.bit_depth = 8
+        print("Auto Exposure= " + str(self.enable))
 
-        # calculate the exposure metric
-        return self.determine_exposure()
+        if not self.enable:
+            return None
 
-    def determine_exposure(self):
-        """
-        Image Exposure Estimation using Skewness Luminance of Histograms
-        """
+        start = time.time()
 
-        # plt.imshow(self.img)
-        # plt.show()
+        if self.mode == "zone_metering" and self.stats is not None:
+            result = self._zone_metering_step()
+        else:
+            result = self._legacy_step()
 
-        # For Luminance Histograms, Image is first converted into greyscale image
-        # Function also returns average luminance of image which is used as AE-Stat
-        grey_img, avg_lum = self.get_greyscale_image(self.img)
-        print("Average luminance is = ", avg_lum)
+        print(f"  Execution time: {time.time() - start:.3f}s")
+        return result
 
-        # Histogram skewness Calculation for AE Stats
-        skewness = self.get_luminance_histogram_skewness(grey_img)
+    # ------------------------------------------------------------------
+    # Zone metering path (Phase 4.2 / 4.3)
+    # ------------------------------------------------------------------
 
-        # get the ranges
-        upper_limit = self.histogram_skewness_range
-        lower_limit = -1 * upper_limit
+    def _zone_metering_step(self) -> ExposureParams:
+        """Industry-grade zone metering + exposure triangle convergence."""
+        parm = self.parm_ae
+
+        # Step 1: measure scene brightness
+        metering = AEMetering(
+            stats           = self.stats,
+            metering_mode   = str(parm.get("metering_mode",   "center_weighted")),
+            spot_fraction   = float(parm.get("spot_fraction",   0.25)),
+            highlight_weight= float(parm.get("highlight_weight", 2.0)),
+        )
+        measured = metering.measure()
 
         if self.is_debug:
-            print("   - AE - Histogram Skewness Range = ", upper_limit)
+            print(f"   - AE zone_metering: measured={measured:.4f}")
 
-        # see if skewness is within range
+        # Step 2: solve exposure triangle
+        controller = AEController(parm_ae=parm, prev_params=self.prev_params)
+        result = controller.step(
+            measured_brightness = measured,
+            highlight_fraction  = float(self.stats.highlight_fraction),
+        )
+
+        if self.is_debug:
+            print(f"   - AE result: shutter={result.shutter_us:.0f}µs  "
+                  f"analog={result.analog_gain_db:.1f}dB  "
+                  f"digital={result.digital_gain:.3f}  "
+                  f"error_ev={result.error_ev:.3f}  "
+                  f"converged={result.converged}")
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Legacy path (original Infinite-ISP algorithm)
+    # ------------------------------------------------------------------
+
+    def _legacy_step(self) -> int:
+        """Original skewness-histogram AE feedback (returns -1/0/+1)."""
+        # Convert Image into 8-bit for AE Calculation
+        img = self.img >> (self.bit_depth - 8)
+        grey_img, avg_lum = self._get_greyscale_image(img)
+        print("Average luminance is = ", avg_lum)
+        skewness = self._get_luminance_histogram_skewness(grey_img)
+        upper_limit =  self.histogram_skewness_range
+        lower_limit = -self.histogram_skewness_range
+        if self.is_debug:
+            print("   - AE - Histogram Skewness Range = ", upper_limit)
         if skewness < lower_limit:
             return -1
         elif skewness > upper_limit:
             return 1
-        else:
-            return 0
+        return 0
 
-    def get_greyscale_image(self, img):
-        """
-        Conversion of an Image into Greyscale Image
-        """
-        # Each RGB pixels with [0.299, 0.587, 0.144] to get its luminance
+    def _get_greyscale_image(self, img):
         grey_img = np.clip(
-            np.dot(img[..., :3], [0.299, 0.587, 0.144]), 0, (2**self.bit_depth)
+            np.dot(img[..., :3], [0.299, 0.587, 0.144]), 0, (2 ** 8)
         ).astype(np.uint16)
         return grey_img, np.average(grey_img, axis=(0, 1))
 
-    def get_luminance_histogram_skewness(self, img):
-        """
-        Skewness Calculation in reference to:
-        Zwillinger, D. and Kokoska, S. (2000). CRC Standard Probability and Statistics
-        Tables and Formulae. Chapman & Hall: New York. 2000. Section 2.2.24.1
-        """
-
-        # First subtract central luminance to calculate skewness around it
+    def _get_luminance_histogram_skewness(self, img):
         img = img.astype(np.float64) - self.center_illuminance
-
-        # The sample skewness is computed as the Fisher-Pearson coefficient of
-        # skewness, i.e. (m_3 / m_2**(3/2)) * g_1
-        # where m_2 is 2nd moment (variance) and m_3 is third moment skewness
-
         img_size = img.size
         m_2 = np.sum(np.power(img, 2)) / img_size
         m_3 = np.sum(np.power(img, 3)) / img_size
-
         g_1 = np.sqrt(img_size * (img_size - 1)) / (img_size - 2)
         skewness = np.nan_to_num((m_3 / abs(m_2) ** (3 / 2)) * g_1)
-
         if self.is_debug:
             print("   - AE - Histogram Skewness = ", skewness)
-
         return skewness
-
-    def execute(self):
-        """
-        Execute Auto Exposure
-        """
-        print("Auto Exposure= " + str(self.enable))
-
-        if self.enable is False:
-            return None
-        else:
-            start = time.time()
-            ae_feedback = self.get_exposure_feedback()
-            print(f"  Execution time: {time.time()-start:.3f}s")
-            return ae_feedback

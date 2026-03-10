@@ -59,7 +59,9 @@ class GammaCorrection:
         else:
             print("LUT is not available for the given bit depth.")
             return self.img
-        return lut[self.img]
+        # Ensure integer index — linear-domain stages may leave float32 arrays
+        img_idx = np.clip(np.round(self.img), 0, 2**self.bit_depth - 1).astype(np.uint16)
+        return lut[img_idx]
 
     def apply_gamma(self):
         """Dispatch to LUT or analytical EOTF based on config."""
