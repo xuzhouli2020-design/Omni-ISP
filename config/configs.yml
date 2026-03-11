@@ -376,3 +376,111 @@ purple_fringe_removal:
   desaturation_radius: 3
   strength: 1.0
 
+# ---------------------------------------------------------------------------
+# DL Denoise — Phase 7: ONNX-based joint demosaic+denoise (DL-B) or
+#              post-demosaic RGB denoiser (DL-A)
+#
+# mode: "bayer_joint" — BJDD-style: noisy Bayer → clean RGB in one pass.
+#          Replaces BNR + Demosaic. 2D NR downgraded to chroma_only.
+#          Expects: (1, 1, H, W) float32 Bayer, normalised to [0, 1].
+#          Returns: (1, 3, H, W) float32 RGB, [0, 1].
+#       "rgb_post"    — NAFNet-style: post-demosaic RGB denoiser.
+#          Replaces 2D NR Y-channel. BNR + Demosaic still run classically.
+#          Expects: (1, 3, H, W) float32 linear RGB, [0, 1].
+#          Returns: (1, 3, H, W) float32 denoised linear RGB, [0, 1].
+#
+# model_path: path to .onnx file. Leave empty for auto-detect from models/.
+#             Run scripts/download_models.py to download pretrained models.
+# tile_size:  inference tile size in pixels (models trained on 256-512 px crops)
+# tile_overlap: blend overlap between tiles to hide seam artefacts
+# fallback_classical: if true, silently fall back when model is missing
+# ---------------------------------------------------------------------------
+dl_denoise:
+  is_enable: false
+  mode: "bayer_joint"          # "bayer_joint" | "rgb_post"
+  model_path: ""               # auto-detect from models/ directory if empty
+  tile_size: 512
+  tile_overlap: 32
+  fallback_classical: true
+
+
+# ---------------------------------------------------------------------------
+# HDR Tone Mapping — Phase 8.3: map scene dynamic range to display range.
+#
+# Pipeline position: between 2D NR (last linear step) and Gamma EOTF.
+# Required for correct PQ / HLG output. Also useful for SDR scenes with
+# high dynamic range (outdoor direct sunlight, mixed indoor/window scenes).
+#
+# mode:
+#   "reinhard"     — global Reinhard (2002). Good general-purpose default.
+#                    L_d = L_s / (1 + L_s) after log-average key adaptation.
+#   "reinhard_ext" — extended Reinhard. Highlights above scene white → 1.0.
+#                    Slightly brighter mid-tones than plain Reinhard.
+#   "aces"         — ACES RRT/ODT approximation (Narkowicz 2015 fit).
+#                    Filmic S-curve, strong contrast, saturated mid-tones.
+#   "hable"        — Hable / Uncharted 2 filmic. Crushed blacks, smooth highs.
+#                    Closest to cinematic film look.
+#   "hlg_rolloff"  — gentle highlight knee only. Use with profile: "hlg".
+#                    Does not recompress; just clips excursions above 1.0.
+#
+# key:              Scene key value for Reinhard (0.18 = normal, <0.18 = dark)
+# white_percentile: Percentile of luminance used for scene-white estimation
+#                   (reinhard_ext). 99 = brightest 1% of pixels sets white.
+# exposure_bias:    Pre-exposure for Hable operator (default 2.0 per GDC slides)
+#
+# peak_nits:        Display peak luminance in nits.  Used only with
+#                   absolute_luminance=true.  Typical values:
+#                     400–600  entry-level HDR TV
+#                    1000–2000 premium HDR TV
+#                   10000     HDR10 / BT.2100 maximum
+#
+# absolute_luminance: If true, convert normalised pixel values to scene nits
+#                   using exposure metadata before tone mapping.  Requires
+#                   iso, shutter_ms, and aperture to be set (here or in
+#                   sensor_info), otherwise falls back silently.
+# iso, shutter_ms, aperture: Exposure metadata. 0 = read from sensor_info.
+# calibration_k:    ISO 12232 camera calibration constant (default 12.5).
+# ---------------------------------------------------------------------------
+hdr_tone_mapping:
+  is_enable: false
+  mode: "reinhard_ext"         # "reinhard" | "reinhard_ext" | "aces" | "hable" | "hlg_rolloff"
+  key: 0.18                    # Reinhard scene key (0.18 = normal key)
+  white_percentile: 99.0       # scene-white percentile for reinhard_ext
+  exposure_bias: 2.0           # Hable pre-exposure multiplier
+  peak_nits: 1000.0            # display peak luminance (nits) for absolute mode
+  absolute_luminance: false    # enable ISO/shutter/aperture → nit conversion
+  iso: 0                       # 0 = read from sensor_info
+  shutter_ms: 0                # 0 = read from sensor_info (in milliseconds)
+  aperture: 0.0                # 0 = read from sensor_info
+  calibration_k: 12.5          # ISO 12232 calibration constant (cd·s/(m²·ISO))
+
+# ---------------------------------------------------------------------------
+# HDR Merge — Phase 8.1: multi-exposure bracketing → single HDR frame.
+#
+# Call isp.merge_exposures(frames, evs) to merge a list of linear RGB frames
+# processed through CCM from different exposure brackets.
+# The merged result feeds into the tone mapping + gamma stages.
+#
+# mode:
+#   "mertens"  — Mertens 2007 exposure fusion. No absolute exposure values
+#                needed. Produces visually pleasing HDR-like output directly.
+#                Uses per-pixel quality: contrast × saturation × exposedness.
+#   "debevec"  — Debevec & Malik 1997 HDR radiance reconstruction.
+#                Requires exposure EV offsets.  Recovers scene radiance map.
+#
+# weight_contrast:    Influence of Laplacian contrast on merge weight
+# weight_saturation:  Influence of per-pixel colour saturation on merge weight
+# weight_exposedness: Influence of well-exposedness (centred at 0.5) on weight
+# sigma_exposedness:  Gaussian σ for well-exposedness quality measure
+# lambda_smooth:      Smoothness weight for Debevec response curve fitting
+# response_samples:   Pixel samples used for Debevec curve estimation
+# ---------------------------------------------------------------------------
+hdr_merge:
+  is_enable: false
+  mode: "mertens"              # "mertens" | "debevec"
+  weight_contrast: 1.0
+  weight_saturation: 1.0
+  weight_exposedness: 1.0
+  sigma_exposedness: 0.2
+  lambda_smooth: 20.0
+  response_samples: 256

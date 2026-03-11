@@ -53,6 +53,9 @@ from modules.burst_capture.burst_merge import merge_burst
 from modules.temporal_nr.temporal_nr import TemporalNR, TNRState
 from modules.lens_correction.lens_correction import LensCorrection
 from modules.purple_fringe_removal.purple_fringe_removal import PurpleFringeRemoval
+from modules.dl_denoise.dl_denoise import DLDenoise
+from modules.hdr_tone_mapping.hdr_tone_mapping import HDRToneMapping
+from modules.hdr_merge.hdr_merge import HDRMerge
 
 
 class OmniISP:
@@ -126,6 +129,9 @@ class OmniISP:
             # Phase 6 — lens correction config sections
             self.parm_lens  = c_yaml.get("lens_correction",       {"is_enable": False})
             self.parm_pfr   = c_yaml.get("purple_fringe_removal", {"is_enable": False})
+            self.parm_dl    = c_yaml.get("dl_denoise",            {"is_enable": False})
+            self.parm_hdrtm = c_yaml.get("hdr_tone_mapping",     {"is_enable": False})
+            self.parm_hdrm  = c_yaml.get("hdr_merge",            {"is_enable": False})
 
         # Phase 4 — persistent 3A state across execute() calls
         self._af_machine      = None   # AFSearchMachine
@@ -149,6 +155,48 @@ class OmniISP:
         (use RawStackLoader for this).  Frame 0 is the reference.
         """
         self._burst_stack = stack
+
+    def merge_exposures(
+        self,
+        linear_rgb_frames: list,
+        exposure_evs: list = None,
+    ) -> np.ndarray:
+        """
+        Phase 8.1 — Multi-exposure HDR merge (call before run_pipeline).
+
+        Takes a list of linear RGB frames (already processed through CCM) from
+        different exposure brackets and returns a single merged frame.
+
+        Typical workflow
+        ----------------
+        1. Run execute() on each bracket to produce linear RGB through CCM.
+        2. Collect the CCM-output frames in a list (capture them from a custom
+           pipeline subclass or by calling run_pipeline with an early exit).
+        3. Call merge_exposures(frames, evs) to get a merged float32 frame.
+        4. Feed the merged frame into the tone mapping + gamma stages.
+
+        For convenience, this can also be used standalone:
+          merged = isp.merge_exposures(frames)  # Mertens (no EV values needed)
+          merged = isp.merge_exposures(frames, [-2, 0, 2])  # Debevec
+
+        Parameters
+        ----------
+        linear_rgb_frames : list of np.ndarray
+            Each (H, W, 3) float32 linear RGB, normalised to [0, 1].
+        exposure_evs      : list of float or None
+            EV offsets for Debevec mode (e.g. [-2, 0, +2]).
+            Ignored in Mertens mode.
+
+        Returns
+        -------
+        np.ndarray  (H, W, 3) float32 in [0, 1]
+        """
+        merge = HDRMerge(
+            images=linear_rgb_frames,
+            exposure_evs=exposure_evs,
+            parm_hdrm=self.parm_hdrm,
+        )
+        return merge.execute()
 
     def load_raw(self):
         """
@@ -273,25 +321,42 @@ class OmniISP:
         lsc_raw = lsc.execute()
 
         # =====================================================================
-        # Bayer noise reduction
-        bnr = BNR(lsc_raw, self.sensor_info, self.parm_bnr, self.platform)
-        bnr_raw = bnr.execute()
+        # DL-B: joint Bayer→RGB (Phase 7) — attempt before classical BNR/Demosaic
+        # When active, the model receives WB-corrected Bayer and returns full-res
+        # linear RGB in [0,1], replacing BNR + Demosaic in a single forward pass.
+        # Falls back to classical path silently if model is missing or ort unavailable.
+        _parm_dl   = self.parm_dl
+        _use_dl_b  = (
+            _parm_dl.get("is_enable", False)
+            and _parm_dl.get("mode", "") == "bayer_joint"
+        )
+        _dl_b_active = False
 
         # =====================================================================
-        # Temporal Noise Reduction (Phase 5.5)
+        # Bayer noise reduction — skipped when DL-B will handle it
+        if _use_dl_b:
+            # DL model takes over BNR's job; pass lsc_raw through for 3A/AWB
+            bnr_raw = lsc_raw
+        else:
+            bnr = BNR(lsc_raw, self.sensor_info, self.parm_bnr, self.platform)
+            bnr_raw = bnr.execute()
+
+        # =====================================================================
+        # Temporal Noise Reduction (Phase 5.5) — skipped in DL-B mode
         # IIR EMA filter with motion masking — video / continuous capture mode.
         # Runs after BNR (cleaner input) and before Stats3A so 3A sees
         # temporally-smoothed Bayer data.
-        tnr_mod = TemporalNR(
-            bnr_raw,
-            self.sensor_info,
-            self.parm_tnr,
-            tnr_state = self._tnr_state,
-        )
-        bnr_raw = tnr_mod.execute()
-        # Persist TNR state for next frame
-        if tnr_mod.new_state is not None:
-            self._tnr_state = tnr_mod.new_state
+        if not _use_dl_b:
+            tnr_mod = TemporalNR(
+                bnr_raw,
+                self.sensor_info,
+                self.parm_tnr,
+                tnr_state = self._tnr_state,
+            )
+            bnr_raw = tnr_mod.execute()
+            # Persist TNR state for next frame
+            if tnr_mod.new_state is not None:
+                self._tnr_state = tnr_mod.new_state
 
         # =====================================================================
         # 3A Statistics — shared Bayer-domain stats for AE, AWB, AF
@@ -333,9 +398,24 @@ class OmniISP:
         wb_raw = wbc.execute()
 
         # =====================================================================
-        # CFA demosaicing
-        cfa_inter = Demosaic(wb_raw, self.platform, self.sensor_info, self.parm_dem)
-        demos_img = cfa_inter.execute()
+        # DL-B joint inference: WB-corrected Bayer → linear RGB in one pass.
+        # If the model is unavailable we fall back to classical Demosaic below.
+        if _use_dl_b:
+            _dl_b_mod    = DLDenoise(wb_raw, self.platform, self.sensor_info, _parm_dl)
+            _dl_b_result = _dl_b_mod.execute()
+            _dl_b_active = _dl_b_mod.dl_active
+
+        # =====================================================================
+        # CFA demosaicing — skipped when DL-B ran successfully
+        if _dl_b_active:
+            # DL result is float32 (H, W, 3) in [0, 1]; scale to sensor range
+            # so downstream modules (CCM, LDCI, etc.) see familiar magnitude.
+            _wl = float(self.sensor_info.get("range",
+                        (1 << self.sensor_info.get("bit_depth", 12)) - 1))
+            demos_img = np.clip(_dl_b_result * _wl, 0.0, _wl).astype(np.float32)
+        else:
+            cfa_inter = Demosaic(wb_raw, self.platform, self.sensor_info, self.parm_dem)
+            demos_img = cfa_inter.execute()
 
         # =====================================================================
         # Purple Fringe Removal — RGB domain, after demosaic, before CCM (Phase 6)
@@ -358,7 +438,15 @@ class OmniISP:
         # LDCI/NR2D internally process channel 0 as luminance Y.
         # We extract linear Y from CCM's linear RGB, pass as channel 0 of a
         # fake YCbCr array, then recover RGB proportionally from enhanced Y.
-        _r, _g, _b = ccm_img[..., 0], ccm_img[..., 1], ccm_img[..., 2]
+        #
+        # Normalisation: CCM outputs uint16 in [0, (2^bit_depth)-1].
+        # LDCI, NR2D (NLM/bilateral), DL-A, and HDR TM all expect float32 in
+        # [0, 1].  We normalise here and scale back just before Gamma so the
+        # LUT (and analytical EOTF) receive values in the correct range.
+        _white_level = float((1 << self.sensor_info.get("bit_depth", 12)) - 1)
+        _r = ccm_img[..., 0].astype(np.float32) / _white_level
+        _g = ccm_img[..., 1].astype(np.float32) / _white_level
+        _b = ccm_img[..., 2].astype(np.float32) / _white_level
         _y_lin = (0.2126 * _r + 0.7152 * _g + 0.0722 * _b).astype(np.float32)
         _fake_yuv = np.stack(
             [_y_lin, np.zeros_like(_y_lin), np.zeros_like(_y_lin)], axis=2
@@ -380,6 +468,30 @@ class OmniISP:
         # =====================================================================
         # 2D Noise Reduction — linear domain, before Gamma and before Sharpen
         # (see dev_notes.md "Gamma ordering fix", "Sharpening — pipeline order fix")
+        #
+        # DL-A path ("rgb_post"): the DL model handles Y-channel denoising; we
+        # downgrade 2D NR to chroma_only so Cb/Cr still get a light polish but
+        # we avoid re-blurring luminance the model just cleaned.
+        # DL-B path ("bayer_joint"): the joint model already denoised everything;
+        # again we run 2D NR in chroma_only as a cheap safety valve.
+        _use_dl_a = (
+            _parm_dl.get("is_enable", False)
+            and _parm_dl.get("mode", "") == "rgb_post"
+        )
+
+        # Effective 2D NR params: force chroma_only when any DL path is active
+        _parm_2dn_eff = self.parm_2dn
+        if _dl_b_active or _use_dl_a:
+            _parm_2dn_eff = dict(self.parm_2dn)
+            _parm_2dn_eff["mode"] = "chroma_only"
+
+        # DL-A inference: operates on linear RGB output of LDCI
+        if _use_dl_a:
+            _dl_a_mod    = DLDenoise(ldci_img, self.platform, self.sensor_info, _parm_dl)
+            _dl_a_result = _dl_a_mod.execute()
+            if _dl_a_mod.dl_active:
+                ldci_img = _dl_a_result   # denoised linear RGB replaces LDCI output
+
         _r2, _g2, _b2 = ldci_img[..., 0], ldci_img[..., 1], ldci_img[..., 2]
         _y_lin2 = (0.2126 * _r2 + 0.7152 * _g2 + 0.0722 * _b2).astype(np.float32)
         _fake_yuv2 = np.stack(
@@ -388,7 +500,7 @@ class OmniISP:
         nr2d = NR2D(
             _fake_yuv2,
             self.sensor_info,
-            self.parm_2dn,
+            _parm_2dn_eff,
             self.platform,
             self.parm_csc["conv_standard"],
         )
@@ -400,9 +512,29 @@ class OmniISP:
         ).astype(np.float32)
 
         # =====================================================================
-        # Gamma — applied after all linear-domain processing (LDCI, 2D NR)
+        # HDR Tone Mapping — Phase 8.3
+        # Sits between 2D NR (last linear-domain step) and Gamma EOTF.
+        # Required for correct PQ / HLG output:
+        #   PQ  — maps scene luminance to [0, peak_nits], normalised to [0, 1]
+        #   HLG — light highlight rolloff only (scene-referred encoding)
+        #   SDR — optional filmic rolloff for high-dynamic-range scenes
+        # Input : float32 linear RGB [0, ~1] (may exceed 1.0 in HDR scenes)
+        # Output: float32 linear RGB [0, 1]   ready for Gamma EOTF
+        hdrtm = HDRToneMapping(
+            nr2d_img, self.platform, self.sensor_info, self.parm_hdrtm
+        )
+        tm_img = hdrtm.execute()
+
+        # =====================================================================
+        # Gamma — applied after all linear-domain processing (LDCI, 2D NR, TM)
         # (see dev_notes.md "Gamma ordering fix")
-        gmc = GC(nr2d_img, self.platform, self.sensor_info, self.parm_gmc)
+        #
+        # Scale from normalised [0, 1] back to sensor bit-depth range so the
+        # LUT gamma (and analytical EOTFs that normalise internally) receives
+        # the expected value domain.  HDR TM output is clipped to [0, 1]
+        # before scaling so that LUT indices stay within [0, (2^depth)-1].
+        _tm_scaled = np.clip(tm_img, 0.0, 1.0) * _white_level
+        gmc = GC(_tm_scaled, self.platform, self.sensor_info, self.parm_gmc)
         gamma_raw = gmc.execute()
 
         # =====================================================================

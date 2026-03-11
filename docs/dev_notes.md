@@ -2193,7 +2193,8 @@ This project extends Infinite-ISP as an **open-source, wearable/embedded-oriente
 | Calibration | None | First-class standalone calibration module |
 | Colour output targets | sRGB only | sRGB, Display P3, HDR10, HLG, linear |
 | Dithering | None | Blue noise spatial dithering |
-| DL integration | None | Planned joint model replacing BNR+Demosaic+2D NR |
+| DL integration | None | ONNX inference wrapper; joint Bayer model (BNR+Demosaic+2D NR) |
+| HDR | None | Tone mapping (Reinhard/ACES/Hable) + Mertens/Debevec merge + ISO 12232 abs. lum. |
 | Target use case | Research / education | Research + wearable/embedded + production output |
 
 ---
@@ -2808,65 +2809,187 @@ purple_fringe_removal:
 
 ---
 
-## [2026-03-09] Phase 7 — DL Integration (plan only, detailed design later)
+## [2026-03-10] Phase 7 — DL Integration
+
+### Repo boundary decision [2026-03-10]
+
+**Omni-ISP is an inference pipeline, not a training framework.** Training infrastructure (unprocessing data generator, loss functions, training loops, fine-tuning scripts) lives in a **separate repo: `omni-isp-train`**. This keeps Omni-ISP clean and deployable without a PyTorch/CUDA dependency.
+
+What lives in **Omni-ISP** (this repo):
+- `modules/dl_denoise/` — ONNX inference wrapper + module class
+- `models/` — directory for `.onnx` model files (gitignored; user provides)
+- `scripts/download_models.py` — one-time setup: downloads and converts pretrained weights to ONNX
+
+What lives in **`omni-isp-train`** (separate repo, future project):
+- `unprocessing.py` — ISP inversion: sRGB → degamma → inverse CCM → mosaic → add sensor noise
+- Training and fine-tuning scripts for the lightweight wearable model
+- The compact U-Net (packed Bayer input, <5 MB INT8) is built and trained there, then exported as `.onnx` and dropped into Omni-ISP's `models/` directory
+
+This separation means Omni-ISP at runtime only needs: `numpy`, `scipy`, `onnxruntime` (optional — falls back to classical if absent).
 
 ### Overview
 
 Three tiers of DL integration, from simplest to most ambitious:
 
-| Tier | Model | Replaces | Dependencies | Training data |
+| Tier | Model | Replaces | Runtime deps | Model weights |
 |---|---|---|---|---|
-| **DL-A** | Pre-trained RGB denoiser (NAFNet/Restormer) | Post-demosaic 2D NR only | ONNX Runtime | Published weights, no training |
-| **DL-B** | Bayer→RGB joint model | BNR + Demosaic + 2D NR Y | PyTorch/ONNX, GPU for training | Unprocessing from sRGB |
-| **DL-C** | Burst N-frame→RGB | Registration + Merge + BNR + Demosaic | PyTorch/ONNX, GPU for training | Synthetic burst via unprocessing |
+| **DL-A** | NAFNet-SIDD-width32 | Post-demosaic 2D NR only | onnxruntime | Download via `scripts/download_models.py` |
+| **DL-B** | BJDD (CVPRW 2021) joint model | BNR + Demosaic + 2D NR Y | onnxruntime | Download + ONNX export via `scripts/download_models.py` |
+| **DL-C** | Burst N-frame→RGB | Registration + Merge + BNR + Demosaic | onnxruntime | Future — train in `omni-isp-train` |
 
-### Key infrastructure to build (in-repo)
+**Leading candidates (chosen 2026-03-10):**
+- DL-A: **NAFNet-SIDD-width32** via [nafnetlib](https://github.com/mikecokina/nafnetlib) / [mikestealth/nafnet-models](https://huggingface.co/mikestealth/nafnet-models) (ONNX available directly). ~17 MB, 40.30 dB PSNR on SIDD.
+- DL-B: **BJDD** ([sharif-apu/BJDD_CVPR21](https://github.com/sharif-apu/BJDD_CVPR21), CVPRW 2021). Input: `(1, 1, H, W)` single-channel Bayer normalised to [0,1]. Output: `(1, 3, H, W)` full-res RGB. PyTorch weights → export to ONNX via download script. ~8 MB.
 
-1. **Unprocessing data generator** (`training/unprocessing.py`): take clean sRGB → invert ISP (degamma → inverse CCM → mosaic → add noise) using actual pipeline parameters from configs.yml. This generates training pairs for DL-B and DL-C.
+**Future wearable-optimised model** (in `omni-isp-train`): compact U-Net with packed 4-channel Bayer input `(1, 4, H/2, W/2)`, targeting <5 MB INT8. Trained from scratch on synthetic data from the unprocessing generator using the actual pipeline's BLC/OECF/CCM parameters. This is the architecturally correct long-term target for embedded/wearable deployment.
 
-2. **ONNX inference wrapper** (`modules/dl_denoise/onnx_inference.py`): load and run any ONNX model within the pipeline. The user provides the model file.
+### Input/output format
 
-3. **Pipeline mode switch**: `dl_denoise.mode` selects classical vs. DL path. `fallback_classical: true` ensures the pipeline still works if the model is missing.
+BJDD (DL-B):
+- Input: `(1, 1, H, W)` float32 in [0, 1], single-channel Bayer mosaic (full resolution)
+- Normalise: `(bayer_uint16 - black_level) / (white_level - black_level)`
+- Output: `(1, 3, H, W)` float32 in [0, 1], full-res RGB (same spatial dims as input)
+- Denormalise: multiply by `(white_level - black_level)` before passing to CCM
 
-### Config placeholder
+NAFNet (DL-A):
+- Input: `(1, 3, H, W)` float32 in [0, 1], linear RGB post-demosaic
+- Output: `(1, 3, H, W)` float32 in [0, 1], denoised linear RGB
+- Drop-in replacement for 2D NR
+
+### Tiled inference
+
+Models are trained on 256×256 or 512×512 patches. For full-resolution frames (e.g. 6048×4024):
+- Tile the input with configurable `tile_size` and `tile_overlap`
+- Run each tile through the model
+- Stitch with linear-blend overlap (avoids hard seam artefacts at tile boundaries)
+
+### Pipeline path switch
+
+```
+Classical path (default, dl_denoise.is_enable: false):
+  BNR → AWB → WB → Demosaic → [CCM → ...]
+
+DL-A path (mode: "rgb_post"):
+  BNR → AWB → WB → Demosaic → DL RGB denoiser → [CCM → ...]
+  (replaces 2D NR; BNR + Demosaic still run classically)
+
+DL-B path (mode: "bayer_joint"):
+  AWB → WB → DL joint model (Bayer→RGB) → [CCM → ...]
+  (BNR and Demosaic skipped; 2D NR set to chroma_only or off)
+```
+
+### Config
 
 ```yaml
 dl_denoise:
   is_enable: false
-  mode: "bayer_joint"                 # "bayer_joint" | "rgb_post" | "burst"
-  model_path: "models/joint_bayer.onnx"
-  fallback_classical: true
-  iso_conditioning: true              # pass ISO as noise level hint to model
+  mode: "bayer_joint"          # "bayer_joint" | "rgb_post"
+  model_path: ""               # auto-detect from models/ if empty
+  tile_size: 512               # inference tile size (px, before overlap)
+  tile_overlap: 32             # overlap between tiles for blend stitching
+  fallback_classical: true     # fall back to classical path if model missing
 ```
 
 ### References
 
-- CycleISP (Zamir et al., 2020) — realistic noise synthesis for Bayer domain training
-- DeepJoint (Gharbi et al., 2016) — joint demosaic+denoise CNN
-- Unprocessing (Brooks et al., 2019) — ISP inversion for training data
-- NAFNet (Chen et al., 2022) — efficient baseline RGB denoiser
-- KPN (Mildenhall et al., 2018) — kernel prediction for burst denoising
-- DBSR (Bhat et al., 2021) — deep burst super-resolution in raw
-
-> **⚑ REVISIT LATER — DL integration** — Design details (architecture, loss functions, training recipe) to be specified when implementation begins. Current plan establishes the framework and interface.
+- BJDD — Beyond Joint Demosaicking and Denoising (Sharif et al., CVPRW 2021): https://github.com/sharif-apu/BJDD_CVPR21
+- NAFNet (Chen et al., ECCV 2022): https://github.com/megvii-research/NAFNet
+- nafnetlib (easy inference wrapper): https://github.com/mikecokina/nafnetlib
+- CycleISP (Zamir et al., CVPR 2020) — realistic Bayer noise synthesis
+- Unprocessing (Brooks et al., CVPR 2019) — ISP inversion for training data (in `omni-isp-train`)
+- Samsung unified-demosaicing (ICCP 2025) — future candidate for wearable model architecture
 
 ---
 
-## [2026-03-09] Phase 8 — HDR Pipeline (plan only, detailed design later)
+## [2026-03-10] Phase 8 — HDR Pipeline [IMPLEMENTED]
 
 ### Overview
 
-Three components needed for correct HDR output:
+Three components for correct HDR output — all implemented.
 
-| Item | What | Depends on |
+| Item | What | Status |
 |---|---|---|
-| **8.1 HDR merge** | Multi-exposure bracketing → single HDR image | Burst capture infrastructure (Phase 5) |
-| **8.2 Absolute luminance mapping** | Exposure metadata → scene luminance in nits | AE metadata (Phase 4) |
-| **8.3 HDR tone mapping** | Map scene dynamic range to display peak luminance | Output profiles (Phase 3.3), EOTF (Phase 3.2) |
+| **8.1 HDR merge** | Multi-exposure bracketing → single HDR image | ✅ Mertens + Debevec |
+| **8.2 Absolute luminance mapping** | Exposure metadata → scene luminance in nits | ✅ ISO 12232 formula |
+| **8.3 HDR tone mapping** | Map scene dynamic range to display peak luminance | ✅ Reinhard / ACES / Hable / HLG rolloff |
 
-The output profile system (Phase 3.3) already supports HDR10 (PQ) and HLG output. What's missing is the tone mapping step that maps the captured scene's actual dynamic range into the display's representable range. Without this, PQ encoding is syntactically valid but tonally wrong.
+### 8.3 — Tone Mapping Architecture
 
-> **⚑ REVISIT LATER — HDR pipeline** — Requires absolute luminance estimation from capture metadata (ISO, shutter, aperture, ND factor). Design details deferred until Phases 4–5 provide the runtime metadata infrastructure.
+**Pipeline position:** immediately after 2D NR (last linear-domain step), before Gamma EOTF.
+
+```
+... → 2D NR → HDR Tone Mapping → Gamma EOTF → AE → CSC → ...
+```
+
+This is the correct position because:
+- Input to tone mapper must be linear light (before gamma)
+- Output must be normalised [0, 1] ready for the EOTF to encode
+- For PQ: 0→1 represents 0→10000 nits on a BT.2100 display
+- For HLG: scene-referred; the rolloff knee handles slight >1 excursions
+- For sRGB/Rec.709: same position; tone mapping is a "look" operator
+
+**Operator design decisions:**
+
+- `reinhard_ext` is the default mode. Extended Reinhard preserves specular highlights
+  by computing scene white from a percentile of the luminance distribution.
+- All operators work in the luminance domain and recover RGB by scaling
+  (chrominance preservation): `ratio = L_out / L_in`, `RGB_out = RGB_in × ratio`.
+  This avoids hue shifts that per-channel tone mapping produces.
+- `aces` is applied per-channel (consistent with the original Narkowicz formulation,
+  which is designed as a display transform, not a creative grading tool).
+- `hable` includes an exposure_bias pre-multiplier (default 2.0, per the original GDC
+  slides) — adjust down for brighter scenes or up for darker-key looks.
+- `hlg_rolloff` is not a full tone mapper. It applies a cubic ease-in-out knee above
+  `knee_start=0.85` to gently limit highlights without compressing the mid-tones.
+  Designed for HLG where the OETF itself handles the scene-referred encoding.
+
+### 8.2 — Absolute Luminance
+
+**Formula (ISO 12232):**
+```
+L_nits = pixel_normalised × (calibration_k × aperture_f²) / (iso × shutter_sec)
+```
+where calibration_k = 12.5 cd·s/(m²·ISO) for reflected-light measurement.
+
+The result is in nits (cd/m²). Before feeding to the tone mapper, divide by `peak_nits`
+(display peak luminance) so the operator receives scene luminance relative to display peak:
+- 0.0 → black
+- 1.0 → display maximum brightness
+- >1.0 → highlight to be compressed
+
+**Metadata resolution order:** explicit config value → sensor_info field → warn + fallback.
+When fallback activates, the tone mapper runs on raw normalised values (identical to
+`absolute_luminance: false`), which is the safe backward-compatible behaviour.
+
+### 8.1 — HDR Merge
+
+**Mertens 2007 — exposure fusion (no radiometric calibration):**
+- Quality weight per pixel: `W = Contrast^w_c × Saturation^w_s × Exposedness^w_e`
+- Contrast: absolute Laplacian on greyscale
+- Saturation: per-pixel std across R,G,B channels
+- Well-exposedness: Gaussian centred at 0.5, σ = 0.2 (configurable)
+- Epsilon floor (1e-6) added before normalisation to handle flat/uniform frames
+  gracefully (avoids float32 underflow on zero-contrast scenes)
+- Result is display-ready in [0, 1] — no tone mapping required after fusion
+
+**Debevec & Malik 1997 — HDR radiance reconstruction:**
+- Recovers camera response curve g(z) via weighted least-squares
+- Hat weighting: full weight in mid-range [64–192], tapers at clipping values
+- Smoothness constraint on g (lambda=20 default, configurable)
+- Log-radiance reconstructed per channel, normalised by median-grey mapping
+- Final output compressed at 99.9th percentile for downstream compatibility
+- Falls back to Mertens (with RuntimeWarning) if EV values not provided
+
+**Wearable camera note:** for single-frame capture (the primary Omni-ISP use case),
+8.1 is irrelevant — only 8.3 and optionally 8.2 are active. The merge API
+(`isp.merge_exposures(frames, evs)`) is designed for multi-shot post-processing
+workflows (bracketing on a still camera, synthetic HDR from a burst, etc.)
+
+> **⚑ REVISIT LATER — Local tone mapping for HDR:** The LDCI guided-filter LTM
+> already handles local contrast enhancement. For full HDR, a second local tone mapper
+> specifically targeting highlight recovery (spatial guidance from HDR luminance map)
+> may be needed in future. Current global operators handle this implicitly via the
+> log-average key adaptation (Reinhard) or shoulder shape (ACES, Hable).
 
 ---
 

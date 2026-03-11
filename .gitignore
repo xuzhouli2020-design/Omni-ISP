@@ -129,3 +129,7 @@ dmypy.json
 .pyre/
 
 .vscode
+
+# Dev-only files — not for public repo
+CLAUDE.md
+docs/dev_notes.md

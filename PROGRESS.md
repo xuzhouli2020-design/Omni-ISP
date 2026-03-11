@@ -1,7 +1,7 @@
 # Omni-ISP — Implementation Roadmap
 
-Status: **Phases 1–3 + Phase 5 + Phase 6 complete (322 tests); Phase 4 (3A) and Phase 7–8 planned; factory calibration deferred**
-Last updated: 2026-03-09
+Status: **Phases 1–3 + Phase 5–8 complete (419 tests); Phase 7 model training in `omni-isp-train`; factory calibration deferred**
+Last updated: 2026-03-10
 
 ---
 
@@ -286,50 +286,85 @@ Design spec preserved in dev_notes.md "Calibration Module — Design Proposal" [
 
 ---
 
-## Phase 7 — DL Integration [NOT STARTED — FUTURE]
+## Phase 7 — DL Integration [INFERENCE INFRASTRUCTURE COMPLETE — 2026-03-10]
 
-Plan only. Detailed architecture when implementation begins.
+**Repo boundary**: Omni-ISP is inference-only. Training infrastructure (unprocessing data generator, training scripts, fine-tuning) lives in a separate `omni-isp-train` repo. The `.onnx` model files are dropped into `models/` and used at inference time without any PyTorch dependency.
 
-- [ ] **7.1 Unprocessing data generator** — ISP inversion for training data synthesis
-  - `training/unprocessing.py`: clean sRGB → degamma → inverse CCM → mosaic → add noise
-  - Uses actual pipeline parameters from configs.yml
+- [x] **7.2 ONNX inference wrapper** — `modules/dl_denoise/onnx_inference.py`
+  - `OnnxInferenceEngine`: loads any ONNX model, runs forward pass
+  - `infer_tiled()`: tile-and-stitch with linear-blend overlap — handles full-resolution frames transparently (configurable `tile_size`, `tile_overlap`)
+  - Graceful `OnnxUnavailable` exception when onnxruntime is not installed
+  - CPU-friendly (ONNX Runtime), supports GPU via execution provider list
+
+- [x] **7.3 DL-A: post-demosaic RGB denoiser** — `mode: "rgb_post"`
+  - Target model: **NAFNet-SIDD-width32** (40.30 dB PSNR on SIDD)
+  - Input: `(1, 3, H, W)` linear RGB; output: denoised linear RGB
+  - Replaces 2D NR Y-channel; 2D NR downgraded to `chroma_only` as safety valve
+  - Download: `python scripts/download_models.py --model nafnet_sidd_width32`
   - Ref: dev_notes.md "Phase 7 — DL Integration"
 
-- [ ] **7.2 ONNX inference wrapper** — generic DL model runner for pipeline
-  - `modules/dl_denoise/onnx_inference.py`: load ONNX model, pre/post process
-  - CPU-friendly (ONNX Runtime) for embedded target
+- [x] **7.4 DL-B: joint Bayer→RGB** — `mode: "bayer_joint"`
+  - Target model: **BJDD** (CVPRW 2021, Sharif et al.)
+  - Input: `(1, 1, H, W)` normalised Bayer [0,1]; output: `(1, 3, H, W)` full-res RGB
+  - Replaces BNR + Demosaic in one ONNX forward pass; TNR skipped in DL-B mode
+  - 2D NR auto-downgraded to `chroma_only`; WB still applied before DL pass
+  - Download + convert: `python scripts/download_models.py --model bjdd`
+  - `module_zoo.py`: registry of known models with input/output specs
+  - `fallback_classical: true` (default) → silent fallback if model missing
+  - Ref: dev_notes.md "Phase 7 — DL Integration"
 
-- [ ] **7.3 DL-A: pre-trained RGB denoiser** — NAFNet/Restormer replacing post-demosaic 2D NR
-  - Published weights, no training required
-  - `dl_denoise.mode: "rgb_post"`
+- [x] **7.5 Model download helper** — `scripts/download_models.py`
+  - Downloads NAFNet ONNX directly from HuggingFace (mikestealth/nafnet-models)
+  - Downloads BJDD PyTorch weights and exports to ONNX via `torch.onnx.export`
+  - One-time setup on any machine with internet + PyTorch; runtime needs only onnxruntime
 
-- [ ] **7.4 DL-B: joint Bayer denoise+demosaic** — replaces BNR + Demosaic + 2D NR Y
-  - Training via unprocessing (7.1)
-  - `dl_denoise.mode: "bayer_joint"`
-  - Ref: dev_notes.md "ML/DL Denoising"
+- [ ] **7.1 Unprocessing data generator** — `omni-isp-train` repo (separate project)
+  - sRGB → degamma → inverse CCM → mosaic → add sensor noise
+  - Uses actual Omni-ISP pipeline parameters (BLC, OECF, CCM, Gamma) as the camera model
+  - Foundation for fine-tuning BJDD or training compact wearable model from scratch
 
-- [ ] **7.5 DL-C: burst DL pipeline** — N frames → clean RGB, no explicit registration
+- [ ] **7.6 Compact wearable model** — `omni-isp-train` repo (separate project)
+  - 4-channel packed Bayer input `(1, 4, H/2, W/2)`, <5 MB INT8 target
+  - Designed for NPU deployment (Snapdragon, Apple Neural Engine)
+  - Train from scratch using unprocessing generator with Sony ZVE10 pipeline params
+
+- [ ] **7.7 DL-C: burst DL pipeline** — N frames → clean RGB, no explicit registration
   - End-to-end learned alignment + merge + denoise + demosaic
-  - `dl_denoise.mode: "burst"`
+  - `dl_denoise.mode: "burst"` (infrastructure placeholder exists)
   - Ref: dev_notes.md "Burst DL"
 
 ---
 
-## Phase 8 — HDR Pipeline [NOT STARTED — FUTURE]
+## Phase 8 — HDR Pipeline [COMPLETE — 2026-03-10]
 
-Plan only. Requires Phases 4–5 metadata infrastructure.
+55 tests. All operators, merge modes, absolute luminance, and pipeline integration verified.
 
-- [ ] **8.1 HDR merge** — multi-exposure bracketing → single HDR frame
-  - Uses burst capture infrastructure (Phase 5)
-  - Debevec/Mertens exposure fusion
+### 8.3 HDR Tone Mapping — `modules/hdr_tone_mapping/`
+- [x] **operators.py** — four global operators + highlight rolloff knee:
+  - `reinhard`      — log-average key adaptation, L_d = L_s / (1 + L_s)
+  - `reinhard_ext`  — extended Reinhard with auto scene-white percentile
+  - `aces`          — ACES RRT/ODT approximation (Narkowicz 2015 fit)
+  - `hable`         — Hable / Uncharted 2 filmic curve (configurable exposure_bias)
+  - `highlight_rolloff` — gentle cubic knee for HLG mode (no full recompression)
+- [x] **hdr_tone_mapping.py** — `HDRToneMapping` module class
+  - Wired between 2D NR (last linear step) and Gamma EOTF
+  - Dispatches to operator by `mode` key; warns + clips on unknown mode
+  - Graceful fallback when `absolute_luminance=true` but metadata missing
 
-- [ ] **8.2 Absolute luminance mapping** — exposure metadata → scene nits
-  - Uses AE metadata (Phase 4): ISO, shutter, aperture
-  - `absolute_luminance_mapping` module before tone mapping
+### 8.2 Absolute Luminance Mapping — integrated into HDRToneMapping
+- [x] `scene_to_absolute_nits(rgb, iso, shutter_sec, aperture_f, k=12.5)` in operators.py
+  - Formula: `L_nits = pixel_value × (k × f²) / (iso × t_sec)`  (ISO 12232)
+  - Normalises by `peak_nits` to feed tone mapper relative to display peak
+  - Reads from `sensor_info` (iso / shutter_ms / aperture) when parm values = 0
 
-- [ ] **8.3 HDR tone mapping** — scene dynamic range → display peak luminance
-  - Needed for correct PQ/HLG output (Phase 3.3 profiles)
-  - Global + local tone mapping operators
+### 8.1 HDR Merge — `modules/hdr_merge/`
+- [x] **hdr_merge.py** — `HDRMerge` class with two modes:
+  - `"mertens"` — Exposure fusion (Mertens 2007): quality weights = contrast ×
+    saturation × well-exposedness; epsilon floor prevents underflow on flat scenes
+  - `"debevec"` — Debevec & Malik 1997: recovers camera response curve via
+    least-squares, reconstructs log-radiance per channel, normalised by median grey
+  - `isp.merge_exposures(frames, evs)` public API on `OmniISP` for multi-exposure workflow
+- [x] Config: `hdr_merge.is_enable: false` (safe default — single-frame path unchanged)
 
 ---
 

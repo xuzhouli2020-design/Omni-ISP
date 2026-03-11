@@ -1,0 +1,160 @@
+platform:
+  filename: DSC02618_crop.raw
+  disable_progress_bar: false
+  leave_pbar_string: false
+  render_3a: false
+  save_format: png
+sensor_info:
+  bayer_pattern: rggb
+  range: 16380
+  bit_depth: 14
+  width: 1920
+  height: 1088
+crop:
+  is_enable: false
+  is_debug: false
+  new_width: 1920
+  new_height: 1088
+  is_save: false
+dead_pixel_correction:
+  is_enable: true
+  dp_threshold: 80
+  mode: mad
+  is_debug: false
+  is_save: false
+black_level_correction:
+  is_enable: true
+  r_offset: 512
+  gr_offset: 512
+  gb_offset: 512
+  b_offset: 512
+  is_linear: false
+  r_sat: 16380
+  gr_sat: 16380
+  gb_sat: 16380
+  b_sat: 16380
+  is_save: false
+oecf:
+  is_enable: false
+  is_save: false
+digital_gain:
+  is_enable: true
+  is_save: false
+lens_shading_correction:
+  is_enable: false
+  is_save: false
+bayer_noise_reduction:
+  is_enable: true
+  filter_window: 9
+  r_std_dev_s: 1
+  is_save: false
+auto_white_balance:
+  is_enable: false
+  underexposed_percentage: 5.0
+  overexposed_percentage: 5.0
+  is_save: false
+white_balance:
+  is_enable: true
+  r_gain: 3.199219
+  b_gain: 1.75
+  gr_gain: 1.0
+  gb_gain: 1.0
+  is_save: false
+demosaic:
+  is_enable: true
+  demosaic_method: mhc
+  is_save: false
+color_correction_matrix:
+  is_enable: false
+  is_save: false
+ldci:
+  is_enable: false
+  mode: clahe
+  clip_limit: 1
+  wind: 16
+  guided_radius: 64
+  guided_eps: 0.01
+  detail_gain: 1.5
+  base_compression: 0.7
+  is_save: false
+sharpen:
+  is_enable: true
+  mode: usm
+  sharpen_sigma: 5
+  sharpen_strength: 1
+  gain: 0.8
+  noise_floor: 0.02
+  edge_max: 0.15
+  halo_limit: 0.1
+  is_save: false
+2d_noise_reduction:
+  is_enable: true
+  mode: nlm
+  window_size: 9
+  patch_size: 5
+  wts: 10
+  y_spatial_sigma: 3.0
+  y_intensity_sigma: 0.05
+  chroma_sigma: 6.0
+  is_save: false
+gamma_correction:
+  is_enable: true
+  eotf: srgb
+  is_save: false
+auto_exposure:
+  is_enable: true
+  zone_grid: 16
+  hist_bins: 256
+  target_mean: 0.5
+  gain_min: 0.5
+  gain_max: 4.0
+  is_save: false
+color_space_conversion:
+  is_enable: true
+  conv_standard: 1
+  is_save: false
+color_space_enhancement:
+  is_enable: false
+  mode: flat
+  saturation_gain: 1.2
+  vibrance_strength: 0.3
+  chroma_limit: 1.0
+rgb_conversion:
+  is_enable: true
+  is_save: false
+scale:
+  is_enable: false
+  new_width: 1920
+  new_height: 1088
+  is_save: false
+yuv_conversion_format:
+  is_enable: false
+  conv_type: '444'
+  is_save: false
+output:
+  profile: custom
+  dither: none
+  format: png
+hdr_tone_mapping:
+  is_enable: false
+  mode: reinhard_ext
+  peak_nits: 1000.0
+  key: 0.18
+  white_percentile: 99.0
+  exposure_bias: 2.0
+  absolute_luminance: false
+  iso: 0
+  shutter_ms: 0
+  aperture: 0.0
+  calibration_k: 12.5
+hdr_merge:
+  is_enable: false
+  mode: mertens
+dl_denoise:
+  is_enable: false
+  mode: rgb_post
+  model_path: models/nafnet_sidd_width32.onnx
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 4
+  fallback_classical: true
