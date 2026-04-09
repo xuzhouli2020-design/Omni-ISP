@@ -176,7 +176,7 @@ class Scale2D:
                     if i == 0
                     else (
                         self.single_channel.shape[0],
-                        int(np.round(self.single_channel.shape[1] // downscale_fact)),
+                        int(np.round(self.single_channel.shape[1] / downscale_fact)),
                     )
                 )
 

@@ -306,6 +306,7 @@ class HDRMerge:
 
         n_eq   = n_samples * N
         n_unkn = 256 + n_samples
+        # 254 smoothness rows + 1 mid-grey fix row = 255 extra rows
         A = np.zeros((n_eq + 255, n_unkn), dtype=np.float32)
         b = np.zeros((n_eq + 255,),        dtype=np.float32)
 
@@ -329,8 +330,9 @@ class HDRMerge:
             k += 1
 
         # Fix middle grey (g(128) = 0 in log domain)
-        mid_eq = n_eq + 127
-        A[mid_eq, 128] = 1.0
+        # Place after all smoothness rows to avoid overwriting them
+        A[k, 128] = 1.0
+        k += 1
 
         # Solve via least-squares
         x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)

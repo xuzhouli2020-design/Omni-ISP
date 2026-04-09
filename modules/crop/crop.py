@@ -45,7 +45,7 @@ class Crop:
             ):
                 dictionary["height"] = self.new_size[0]
                 dictionary["width"] = self.new_size[1]
-                dictionary["orig_size"] = str(self.img.T.shape)
+                dictionary["orig_size"] = str(self.img.shape)
 
     def crop(self, img, rows_to_crop=0, cols_to_crop=0):
 
@@ -63,10 +63,11 @@ class Crop:
 
         if rows_to_crop or cols_to_crop:
             if rows_to_crop % 4 == 0 and cols_to_crop % 4 == 0:
-                img = img[
-                    rows_to_crop // 2 : -rows_to_crop // 2,
-                    cols_to_crop // 2 : -cols_to_crop // 2,
-                ]
+                r_start = rows_to_crop // 2
+                r_end = -rows_to_crop // 2 if rows_to_crop else None
+                c_start = cols_to_crop // 2
+                c_end = -cols_to_crop // 2 if cols_to_crop else None
+                img = img[r_start:r_end, c_start:c_end]
             else:
                 print(
                     "   - Input/Output heights are not compatible."

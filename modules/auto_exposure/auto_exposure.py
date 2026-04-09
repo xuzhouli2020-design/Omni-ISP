@@ -149,7 +149,7 @@ class AutoExposure:
 
     def _get_greyscale_image(self, img):
         grey_img = np.clip(
-            np.dot(img[..., :3], [0.299, 0.587, 0.144]), 0, (2 ** 8)
+            np.dot(img[..., :3], [0.299, 0.587, 0.114]), 0, (2 ** 8) - 1
         ).astype(np.uint16)
         return grey_img, np.average(grey_img, axis=(0, 1))
 

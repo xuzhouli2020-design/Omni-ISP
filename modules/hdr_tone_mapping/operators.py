@@ -241,7 +241,7 @@ def highlight_rolloff(
     # Smooth cubic ease-in-out: 3t² - 2t³
     t_smooth = t * t * (3.0 - 2.0 * t)
     # Blended luminance: linear below knee, compressed above
-    L_knee = knee_start + knee_range * (1.0 - (1.0 - t_smooth) ** 0.5)
+    L_knee = knee_start + (1.0 - knee_start) * (1.0 - (1.0 - t_smooth) ** 0.5)
     L_out = np.where(above, L_knee, L)
     L_out = np.clip(L_out, 0.0, 1.0)
 

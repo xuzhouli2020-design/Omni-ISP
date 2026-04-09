@@ -54,7 +54,7 @@ class NearestNeighbor:
 
         for row in range(new_height):
             for col in range(new_width):
-                row_nearest = int(np.floor(row / scale_height))
-                col_nearest = int(np.floor(col / scale_width))
+                row_nearest = min(int(np.floor(row / scale_height)), old_height - 1)
+                col_nearest = min(int(np.floor(col / scale_width)), old_width - 1)
                 scaled_img[row, col] = self.single_channel[row_nearest, col_nearest]
         return scaled_img

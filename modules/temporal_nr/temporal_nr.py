@@ -192,13 +192,12 @@ class TemporalNR:
         ghosting halos at boundaries.
         Pure NumPy (no scipy needed).
         """
-        eroded = static.copy()
-        # Erode using minimum of 4-connected neighbours
-        H, W = static.shape
-        eroded[1:,  :]  = np.minimum(eroded[1:,  :],  static[:-1, :])
-        eroded[:-1, :]  = np.minimum(eroded[:-1, :],  static[1:,  :])
-        eroded[:,  1:]  = np.minimum(eroded[:,  1:],  static[:,  :-1])
-        eroded[:, :-1]  = np.minimum(eroded[:, :-1],  static[:,  1:])
+        # Erode using minimum of 4-connected neighbours (all from original)
+        padded = np.pad(static, 1, mode="edge")
+        eroded = np.minimum(
+            np.minimum(padded[1:-1, 1:-1], padded[:-2, 1:-1]),  # center, top
+            np.minimum(padded[2:, 1:-1], np.minimum(padded[1:-1, :-2], padded[1:-1, 2:]))  # bottom, left, right
+        )
         return eroded
 
     def _blend(self,

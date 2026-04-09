@@ -117,7 +117,7 @@ class ColorSpaceConversion:
 
 
         # black-level/DC offset added to YUV values
-        yuv_2d[0, :] = 2 ** (self.bit_depth / 2) + yuv_2d[0, :]
+        yuv_2d[0, :] = 2 ** (self.bit_depth - 4) + yuv_2d[0, :]
         yuv_2d[1, :] = 2 ** (self.bit_depth - 1) + yuv_2d[1, :]
         yuv_2d[2, :] = 2 ** (self.bit_depth - 1) + yuv_2d[2, :]
 

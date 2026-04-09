@@ -142,13 +142,13 @@ def apply_eotf(img: np.ndarray, eotf_name: str, bit_depth: int) -> np.ndarray:
             f"Choose one of: {sorted(EOTF_REGISTRY)}"
         )
 
-    # Normalise input to [0, 1]
+    # Normalise input to [0, 1] using full-scale bit depth value
     img_f = img.astype(np.float64)
-    max_val = float(img_f.max())
-    if max_val <= 0.0:
+    full_scale = float((1 << bit_depth) - 1)
+    if full_scale <= 0.0:
         return np.zeros_like(img, dtype=np.uint8)
 
-    img_norm = (img_f / max_val).astype(np.float32)
+    img_norm = np.clip(img_f / full_scale, 0.0, 1.0).astype(np.float32)
 
     # Apply per-channel EOTF
     out_norm = fn(img_norm)

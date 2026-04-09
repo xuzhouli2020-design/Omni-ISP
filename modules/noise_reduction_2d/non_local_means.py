@@ -67,7 +67,7 @@ class NLM:
             input_image = np.round(255 * input_image).astype(np.uint8)
 
         # Declaring empty array for output image after denoising
-        denoised_out = np.empty(in_image.shape, dtype=np.uint8)
+        denoised_out = np.empty(in_image.shape, dtype=in_image.dtype)
 
         # Padding the input_image
         pads = window_size // 2

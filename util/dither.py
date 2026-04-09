@@ -219,13 +219,13 @@ def apply_dither(img: np.ndarray,
         # round(v*maxval + mask - 0.5) = floor(v*maxval + mask)
         mask = _get_blue_noise_mask(_BLUE_NOISE_SIZE)
         tiled = _tile_mask(mask, H, W).astype(np.float32)
-        noise = (tiled - 0.5) / maxval          # range: -0.5/maxval to +0.5/maxval
+        # Threshold dither: floor(v*maxval + mask) where mask ∈ [0, 1)
         if img_f.ndim == 3:
-            noise = noise[:, :, None]
-        result = np.clip(np.floor(img_f * maxval + tiled[:, :, None]
-                                   if img_f.ndim == 3
-                                   else img_f * maxval + tiled),
-                         0, maxval)
+            result = np.clip(np.floor(img_f * maxval + tiled[:, :, None]),
+                             0, maxval)
+        else:
+            result = np.clip(np.floor(img_f * maxval + tiled),
+                             0, maxval)
     else:
         raise ValueError(f"Unknown dither mode '{mode}'. "
                          f"Valid: 'none', 'tpdf', 'blue_noise'")
