@@ -52,6 +52,44 @@
 
 <p align="center"><em>Raw Bayer sensor data &rarr; display-ready images, processed entirely by Omni-ISP</em></p>
 
+### Low-Light Burst Denoising
+
+<table>
+  <tr>
+    <td align="center" colspan="2"><strong>ISO 2000 &mdash; 8-Frame Burst Denoising</strong></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="assets/burst_denoising_indoor_panel.png" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><em>Top-left: single frame (noisy) &rarr; Top-right: Gaussian NR (over-smoothed) &rarr; Bottom-left: 8-frame burst merge (2.82&times; cleaner, near-theoretical 2.83&times;) &rarr; Bottom-right: burst + light NR (6&times; cleaner, sharp edges preserved)</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" colspan="2"><strong>ISO 2000 &mdash; Center Crop Detail</strong></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="assets/burst_denoising_panel.png" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><em>Same burst denoising pipeline at 512&times;512 center crop &mdash; noise texture vanishes while fine detail is retained</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" colspan="2"><strong>ISO 4000 Dark Scene &mdash; Shadow Recovery</strong></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="assets/shadow_recovery_panel.png" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><em>Top row: natural exposure (single vs. 10-frame burst vs. +1 EV push). Bottom row: +2 EV shadow push &mdash; single frame drowns in noise, burst merge stays clean, burst + NR delivers the best shadow detail.</em></td>
+  </tr>
+</table>
+
 ---
 
 ## What is Omni-ISP?
