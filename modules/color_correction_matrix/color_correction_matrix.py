@@ -37,7 +37,7 @@ class ColorCorrectionMatrix:
         self.enable = parm_ccm["is_enable"]
         self.sensor_info = sensor_info
         self.parm_ccm = parm_ccm
-        self.bit_depthth = sensor_info["bit_depth"]
+        self.bit_depth = sensor_info["bit_depth"]
         self.ccm_mat = None
         self.is_save = parm_ccm["is_save"]
         self.platform = platform
@@ -110,7 +110,7 @@ class ColorCorrectionMatrix:
             self.ccm_mat = self._build_direct_matrix()
 
         # normalize nbit to 0-1 img
-        img_f = np.float32(self.img) / (2**self.bit_depthth - 1)
+        img_f = np.float32(self.img) / (2**self.bit_depth - 1)
 
         # convert to Nx3 (imatest row-vector convention)
         img_flat = img_f.reshape(-1, 3)
@@ -123,7 +123,7 @@ class ColorCorrectionMatrix:
 
         # convert back
         out = out_flat.reshape(img_f.shape)
-        out = np.uint16(out * (2**self.bit_depthth - 1))
+        out = np.uint16(out * (2**self.bit_depth - 1))
 
         return out
 

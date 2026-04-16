@@ -109,7 +109,9 @@ class Scale:
             start = time.time()
             scaled_img = self.apply_scaling()
             print(f"  Execution time: {time.time() - start:.3f}s")
-            return scaled_img
+            self.img = scaled_img
+
+        self.save()
         return self.img
 
 

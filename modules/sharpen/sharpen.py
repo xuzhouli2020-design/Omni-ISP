@@ -58,7 +58,7 @@ class Sharpening:
             save_output_array_yuv(
                 self.platform["in_file"],
                 self.img,
-                "Out_Shapening_",
+                "Out_Sharpening_",
                 self.platform,
                 self.conv_std,
             )
